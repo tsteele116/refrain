@@ -1,0 +1,1247 @@
+import Cocoa
+import UserNotifications
+import ServiceManagement
+
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    var statusItem: NSStatusItem!
+    var breakTimer: BreakTimer!
+    var preferencesWindow: NSWindow?
+    var menuUpdateTimer: Timer?
+    
+    // References to timer menu items for live updates
+    var microBreakMenuItem: NSMenuItem?
+    var longBreakMenuItem: NSMenuItem?
+    var pausedMenuItem: NSMenuItem?
+    
+    var menuIsOpen: Bool = false // Track if menu is open
+    
+    func applicationDidFinishLaunching(_ aNotification: Notification) {
+        // Ensure app runs as a menu bar (agent) app
+        NSApp.setActivationPolicy(.accessory)
+        // Request notification permissions
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if granted {
+                print("Notification permission granted")
+            }
+        }
+        
+        // Create status bar item
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.action = #selector(statusBarButtonClicked)
+        statusItem.button?.target = self
+        
+        // Initialize break timer
+        breakTimer = BreakTimer()
+        breakTimer.appDelegate = self // Set reference for menu bar updates
+        breakTimer.start() // This now schedules its core work asynchronously
+        
+        // Create initial menu (will be updated dynamically)
+        // Defer this initial menu update to allow BreakTimer's async start to complete first
+        DispatchQueue.main.async { [weak self] in // Use [weak self] for safety
+            print("[AppDelegate] applicationDidFinishLaunching: Performing initial deferred updateMenu()")
+            self?.updateMenu()
+        }
+    }
+    
+    func updateMenu() {
+        print("[AppDelegate] updateMenu() called")
+        // Defensive: Invalidate menuUpdateTimer before rebuilding menu
+        if let timer = menuUpdateTimer {
+            print("[AppDelegate] updateMenu() invalidating menuUpdateTimer before menu rebuild")
+            timer.invalidate()
+            menuUpdateTimer = nil
+        }
+        if menuIsOpen {
+            print("[AppDelegate] updateMenu() skipped menu rebuild because menuIsOpen; updating timer items only")
+            updateTimerMenuItems()
+            return
+        }
+        let menu = NSMenu()
+        
+        // Clear previous references
+        microBreakMenuItem = nil
+        longBreakMenuItem = nil
+        pausedMenuItem = nil
+        
+        // Check if waiting for break confirmation
+        if breakTimer.isWaitingForBreakConfirmation {
+            let breakTypeText = breakTimer.lastBreakType == .micro ? "Micro Break" : "Long Break"
+            let confirmItem = NSMenuItem(title: "✅ \(breakTypeText) Complete", action: #selector(confirmBreakComplete), keyEquivalent: "")
+            menu.addItem(confirmItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+        // Add timer status items
+        else if let _ = breakTimer.microBreakStartTime,
+                let _ = breakTimer.longBreakStartTime {
+            
+            // Create timer menu items and store references
+            microBreakMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            microBreakMenuItem!.isEnabled = false
+            menu.addItem(microBreakMenuItem!)
+            
+            longBreakMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            longBreakMenuItem!.isEnabled = false
+            menu.addItem(longBreakMenuItem!)
+            
+            menu.addItem(NSMenuItem.separator())
+        } else if breakTimer.isPaused {
+            // Show paused state
+            pausedMenuItem = NSMenuItem(title: "⏸️ Breaks Paused", action: nil, keyEquivalent: "")
+            pausedMenuItem!.isEnabled = false
+            menu.addItem(pausedMenuItem!)
+            menu.addItem(NSMenuItem.separator())
+        }
+        
+        // Add control items
+        menu.addItem(NSMenuItem(title: "Preferences", action: #selector(showPreferences), keyEquivalent: ""))
+        
+        if breakTimer.isWaitingForBreakConfirmation {
+            // Don't show pause/resume when waiting for confirmation
+        } else {
+            let pauseTitle = breakTimer.isPaused ? "Resume Breaks" : "Pause Breaks"
+            menu.addItem(NSMenuItem(title: pauseTitle, action: #selector(toggleBreaks), keyEquivalent: ""))
+        }
+        
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        
+        statusItem.menu = menu
+        statusItem.menu?.delegate = self
+        
+        // Update timer values
+        updateTimerMenuItems()
+    }
+    
+    func updateTimerMenuItems() {
+        print("[AppDelegate] updateTimerMenuItems() called")
+        guard let microStart = breakTimer.microBreakStartTime,
+              let longStart = breakTimer.longBreakStartTime else {
+            print("[AppDelegate] updateTimerMenuItems() aborted: missing start times")
+            return
+        }
+        let now = Date()
+        let microElapsed = now.timeIntervalSince(microStart)
+        let longElapsed = now.timeIntervalSince(longStart)
+        let microRemaining = max(0, breakTimer.microBreakInterval - microElapsed)
+        let longRemaining = max(0, breakTimer.longBreakInterval - longElapsed)
+        // Update micro break timer
+        if let microItem = microBreakMenuItem {
+            let microMinutes = Int(microRemaining) / 60
+            let microSeconds = Int(microRemaining) % 60
+            let microTimeString = String(format: "%d:%02d", microMinutes, microSeconds)
+            microItem.title = "👁️ Micro Break: \(microTimeString)"
+        } else {
+            print("[AppDelegate] updateTimerMenuItems: microBreakMenuItem is nil")
+        }
+        // Update long break timer
+        if let longItem = longBreakMenuItem {
+            let longMinutes = Int(longRemaining) / 60
+            let longSecondsTotal = Int(longRemaining) % 60
+            let longTimeString = String(format: "%d:%02d", longMinutes, longSecondsTotal)
+            longItem.title = "☕️ Long Break: \(longTimeString)"
+        } else {
+            print("[AppDelegate] updateTimerMenuItems: longBreakMenuItem is nil")
+        }
+    }
+    
+    // NSMenuDelegate method - called right before menu opens
+    func menuWillOpen(_ menu: NSMenu) {
+        print("[AppDelegate] menuWillOpen: setting menuIsOpen = true")
+        menuIsOpen = true
+        updateMenu()
+        // Start live updates while menu is open - only update timer values, not rebuild menu
+        menuUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            print("[AppDelegate] menuUpdateTimer fired")
+            self?.updateTimerMenuItems()
+        }
+    }
+    
+    // NSMenuDelegate method - called when menu closes
+    func menuDidClose(_ menu: NSMenu) {
+        print("[AppDelegate] menuDidClose: setting menuIsOpen = false")
+        menuIsOpen = false
+        // Stop live updates when menu closes
+        if let timer = menuUpdateTimer {
+            print("[AppDelegate] menuDidClose invalidating menuUpdateTimer")
+            timer.invalidate()
+        }
+        menuUpdateTimer = nil
+    }
+    
+    @objc func statusBarButtonClicked() {
+        // Update menu with current timer values before showing
+        updateMenu()
+        statusItem.menu?.popUp(positioning: nil, at: NSPoint.zero, in: statusItem.button)
+    }
+    
+    @objc func showPreferences() {
+        if preferencesWindow == nil {
+            let preferencesVC = PreferencesViewController()
+            preferencesWindow = NSWindow(contentViewController: preferencesVC)
+            preferencesWindow?.title = "Refrain Preferences" // Updated App Name
+            preferencesWindow?.styleMask = [.titled, .closable]
+            preferencesWindow?.center()
+        }
+        preferencesWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    @objc func toggleBreaks() {
+        breakTimer.togglePause()
+        updateMenu()
+    }
+    
+    @objc func confirmBreakComplete() {
+        breakTimer.confirmBreakComplete()
+    }
+    
+    func applicationWillTerminate(_ aNotification: Notification) {
+        menuUpdateTimer?.invalidate()
+        breakTimer?.stop()
+    }
+}
+
+// Define BreakStats struct globally or ensure it's accessible to both classes
+struct BreakStats {
+    let microBreaksTaken: Int
+    let longBreaksTaken: Int
+    let timeUntilNextMicroBreak: TimeInterval 
+    let timeUntilNextLongBreak: TimeInterval
+    let currentBreakType: BreakType? // To know which break screen we are on
+}
+
+class BreakTimer {
+    private var microBreakTimer: Timer?
+    private var longBreakTimer: Timer?
+    private var displayUpdateTimer: Timer?
+    private var currentBreakWindow: BreakWindow?
+    var isPaused = false // Global pause state (e.g., user manually pauses all breaks)
+    var isWaitingForBreakConfirmation = false
+    
+    var microBreakInterval: TimeInterval = 20 * 60 
+    var microBreakDuration: TimeInterval = 20 
+    var longBreakInterval: TimeInterval = 60 * 60 
+    var longBreakDuration: TimeInterval = 10 * 60 
+    
+    var microBreakStartTime: Date?
+    var longBreakStartTime: Date?
+    var lastBreakType: BreakType? // Which break just occurred
+
+    // For preserving time when one break interrupts another
+    private var microBreakAccumulatedElapsed: TimeInterval = 0
+    private var longBreakAccumulatedElapsed: TimeInterval = 0
+    private var isMicroBreakTimerPausedPendingOtherBreak = false
+    private var isLongBreakTimerPausedPendingOtherBreak = false
+
+    weak var appDelegate: AppDelegate?
+    
+    var microBreaksTakenSession: Int = 0
+    var longBreaksTakenSession: Int = 0
+    
+    init() {
+        loadSettings()
+    }
+    
+    // For FULL global pause or complete reset
+    func stop() {
+        print("[BreakTimer] stop() (FULL STOP/RESET) called.")
+        microBreakTimer?.invalidate()
+        longBreakTimer?.invalidate()
+        displayUpdateTimer?.invalidate()
+        microBreakTimer = nil
+        longBreakTimer = nil
+        displayUpdateTimer = nil
+        microBreakStartTime = nil
+        longBreakStartTime = nil
+        microBreakAccumulatedElapsed = 0
+        longBreakAccumulatedElapsed = 0
+        isMicroBreakTimerPausedPendingOtherBreak = false
+        isLongBreakTimerPausedPendingOtherBreak = false
+        print("[BreakTimer] stop(): All timers, start times, and accumulated states reset.")
+    }
+    
+    func start() {
+        print("[BreakTimer] start() called - scheduling core logic asynchronously")
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            print("[BreakTimer] start() - async block executing")
+            
+            // DO NOT call self.stop() here as it would reset accumulated progress.
+            // Invalidation of specific timers is handled by pauseForBreakConfirmation or by global pause.
+
+            // Reset "paused pending other break" flags at the beginning of start().
+            // Their purpose was to prevent (re)scheduling during an active break of the other type.
+            // If start() is called, that phase is over, and we should attempt to schedule both timers.
+            if self.isMicroBreakTimerPausedPendingOtherBreak {
+                print("[BreakTimer] start() - async: Clearing isMicroBreakTimerPausedPendingOtherBreak (was true).")
+                self.isMicroBreakTimerPausedPendingOtherBreak = false
+            }
+            if self.isLongBreakTimerPausedPendingOtherBreak {
+                print("[BreakTimer] start() - async: Clearing isLongBreakTimerPausedPendingOtherBreak (was true).")
+                self.isLongBreakTimerPausedPendingOtherBreak = false
+            }
+
+            guard !self.isPaused else { // Global pause state
+                print("[BreakTimer] start() - async: aborted: isPaused (global pause state)")
+                self.appDelegate?.statusItem.button?.title = "⏸️"
+                self.appDelegate?.updateMenu()
+                return 
+            }
+
+            let now = Date()
+            var effectiveMicroInterval: TimeInterval
+            var effectiveLongInterval: TimeInterval
+
+            // Micro Timer Setup
+            effectiveMicroInterval = self.microBreakInterval - self.microBreakAccumulatedElapsed
+            self.microBreakStartTime = now // Start time for this new segment of activity
+            print("[BreakTimer] start() - async: Micro. Accumulated: \(self.microBreakAccumulatedElapsed), Effective Interval: \(effectiveMicroInterval)")
+            // With flags cleared above, the !self.isMicroBreakTimerPausedPendingOtherBreak check becomes redundant here but is harmless.
+            if effectiveMicroInterval > 0 /* && !self.isMicroBreakTimerPausedPendingOtherBreak */ {
+                self.microBreakTimer = Timer.scheduledTimer(withTimeInterval: effectiveMicroInterval, repeats: false) { [weak self] _ in // SINGLE SHOT
+                    print("[BreakTimer] microBreakTimer fired (single shot for remaining time)")
+                    self?.microBreakAccumulatedElapsed = 0 // Reset after firing for this segment
+                    self?.showMicroBreak()
+                }
+                print("[BreakTimer] start() - async: Micro break timer scheduled for \(effectiveMicroInterval)s")
+            } /* else if self.isMicroBreakTimerPausedPendingOtherBreak { // This branch should no longer be taken if start() clears the flag
+                 print("[BreakTimer] start() - async: Micro break timer remains paused (should not happen if flag cleared above).")
+            } */ else { // This means effectiveMicroInterval <= 0
+                print("[BreakTimer] start() - async: Micro break effective interval is <= 0. Triggering immediately or skipping.")
+                self.microBreakAccumulatedElapsed = 0
+                self.showMicroBreak() // Or handle completion if interval was zero
+            }
+            // self.isMicroBreakTimerPausedPendingOtherBreak = false // Already done at the start of this async block
+
+            // Long Timer Setup
+            effectiveLongInterval = self.longBreakInterval - self.longBreakAccumulatedElapsed
+            self.longBreakStartTime = now // Start time for this new segment of activity
+            print("[BreakTimer] start() - async: Long. Accumulated: \(self.longBreakAccumulatedElapsed), Effective Interval: \(effectiveLongInterval)")
+            // With flags cleared above, the !self.isLongBreakTimerPausedPendingOtherBreak check becomes redundant here but is harmless.
+            if effectiveLongInterval > 0 /* && !self.isLongBreakTimerPausedPendingOtherBreak */ {
+                self.longBreakTimer = Timer.scheduledTimer(withTimeInterval: effectiveLongInterval, repeats: false) { [weak self] _ in // SINGLE SHOT
+                    print("[BreakTimer] longBreakTimer fired (single shot for remaining time)")
+                    self?.longBreakAccumulatedElapsed = 0 // Reset after firing for this segment
+                    self?.showLongBreak()
+                }
+                print("[BreakTimer] start() - async: Long break timer scheduled for \(effectiveLongInterval)s")
+            } /* else if self.isLongBreakTimerPausedPendingOtherBreak { // This branch should no longer be taken if start() clears the flag
+                print("[BreakTimer] start() - async: Long break timer remains paused (should not happen if flag cleared above).")
+            } */ else { // This means effectiveLongInterval <= 0
+                print("[BreakTimer] start() - async: Long break effective interval is <= 0. Triggering immediately or skipping.")
+                self.longBreakAccumulatedElapsed = 0
+                self.showLongBreak()
+            }
+            // self.isLongBreakTimerPausedPendingOtherBreak = false // Already done at the start of this async block
+            
+            // Display Update Timer - always runs if not globally paused
+            print("[BreakTimer] start() - async: scheduling displayUpdateTimer")
+            self.displayUpdateTimer?.invalidate() // Ensure no duplicates
+            self.displayUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.updateMenuBarDisplay()
+            }
+            print("[BreakTimer] start() - async: displayUpdateTimer scheduled successfully")
+            
+            self.updateMenuBarDisplay() 
+            print("[BreakTimer] start() - async: finished initial updateMenuBarDisplay() call")
+        }
+        print("[BreakTimer] start() finished scheduling core logic asynchronously")
+    }
+    
+    func togglePause() {
+        print("[BreakTimer] togglePause() called. isPaused was \(isPaused)")
+        isPaused.toggle()
+        if isPaused {
+            print("[BreakTimer] togglePause(): Now PAUSED")
+            stop() // This will nil out timers and start times
+            appDelegate?.statusItem.button?.title = "⏸️"
+            // No need to call updateMenuBarDisplay as stop + title set is enough for paused state indication
+        } else {
+            print("[BreakTimer] togglePause(): Now RESUMING")
+            // When resuming, we want new start times for a fresh cycle from this point.
+            // start() will handle setting new start times and scheduling timers.
+            start()
+        }
+        appDelegate?.updateMenu() // Always update menu to reflect Pause/Resume text and timer states
+        print("[BreakTimer] togglePause() finished. isPaused is now \(isPaused)")
+    }
+    
+    private func updateMenuBarDisplay() {
+        // This method might be called by displayUpdateTimer when one of the break timers is technically paused
+        // (e.g. long break timer is paused because a micro break is in its confirmation phase).
+        // We need to accurately reflect the *actual* remaining time for each.
+
+        let now = Date()
+        var microRemaining: TimeInterval
+        var longRemaining: TimeInterval
+
+        if isMicroBreakTimerPausedPendingOtherBreak {
+            microRemaining = max(0, microBreakInterval - microBreakAccumulatedElapsed)
+            print("[BreakTimer] updateMenuBarDisplay: Micro break timer is paused (pending long break). Remaining based on accumulated: \(microRemaining)")
+        } else if let microStart = microBreakStartTime {
+            let elapsed = now.timeIntervalSince(microStart)
+            microRemaining = max(0, microBreakInterval - (microBreakAccumulatedElapsed + elapsed))
+             print("[BreakTimer] updateMenuBarDisplay: Micro break timer active. Start: \(microStart), Elapsed total: \((microBreakAccumulatedElapsed + elapsed)), Remaining: \(microRemaining)")
+        } else { // No start time, so timer is effectively not running or just reset
+            microRemaining = microBreakInterval
+            print("[BreakTimer] updateMenuBarDisplay: Micro break timer has no start time. Displaying full interval.")
+        }
+
+        if isLongBreakTimerPausedPendingOtherBreak {
+            longRemaining = max(0, longBreakInterval - longBreakAccumulatedElapsed)
+            print("[BreakTimer] updateMenuBarDisplay: Long break timer is paused (pending micro break). Remaining based on accumulated: \(longRemaining)")
+        } else if let longStart = longBreakStartTime {
+            let elapsed = now.timeIntervalSince(longStart)
+            longRemaining = max(0, longBreakInterval - (longBreakAccumulatedElapsed + elapsed))
+            print("[BreakTimer] updateMenuBarDisplay: Long break timer active. Start: \(longStart), Elapsed total: \((longBreakAccumulatedElapsed + elapsed)), Remaining: \(longRemaining)")
+        } else {
+            longRemaining = longBreakInterval
+            print("[BreakTimer] updateMenuBarDisplay: Long break timer has no start time. Displaying full interval.")
+        }
+        
+        guard let appDelegate = appDelegate else { return }
+
+        if isWaitingForBreakConfirmation { // If waiting for any break confirmation, show ✅
+            appDelegate.statusItem.button?.title = "✅"
+            return
+        }
+        
+        if isPaused { // Global pause
+             appDelegate.statusItem.button?.title = "⏸️"
+             return
+        }
+
+        // If not waiting for confirmation and not globally paused, show the next break countdown.
+        let nextBreakTime = min(microRemaining, longRemaining)
+        let isNextBreakMicro = microRemaining <= longRemaining
+        
+        let minutes = Int(nextBreakTime) / 60
+        let seconds = Int(nextBreakTime) % 60
+        
+        let icon = isNextBreakMicro ? "👁️" : "☕️"
+        let timeString = String(format: "%d:%02d", minutes, seconds)
+        
+        appDelegate.statusItem.button?.title = "\(icon) \(timeString)"
+    }
+    
+    func showMicroBreak() {
+        guard !isPaused && !isWaitingForBreakConfirmation else { return }
+        print("[BreakTimer] Showing micro break")
+        
+        pauseForBreakConfirmation(breakType: .micro)
+
+        let stats = getCurrentBreakStats() // Get current stats (shows completed breaks)
+
+        DispatchQueue.main.async {
+            self.currentBreakWindow = BreakWindow(
+                duration: self.microBreakDuration,
+                breakType: .micro,
+                breakTimer: self,
+                stats: stats // Pass stats
+            )
+            self.currentBreakWindow?.show()
+            NSApp.activate(ignoringOtherApps: true) // Bring app to front
+        }
+        // UserNotifications.shared.sendNotification(type: .micro, duration: microBreakDuration) // Already handled by break window
+    }
+    
+    func showLongBreak() {
+        guard !isPaused && !isWaitingForBreakConfirmation else { return }
+        print("[BreakTimer] Showing long break")
+        
+        pauseForBreakConfirmation(breakType: .long)
+
+        let stats = getCurrentBreakStats() // Get current stats (shows completed breaks)
+
+        DispatchQueue.main.async {
+            self.currentBreakWindow = BreakWindow(
+                duration: self.longBreakDuration,
+                breakType: .long,
+                breakTimer: self,
+                stats: stats // Pass stats
+            )
+            self.currentBreakWindow?.show()
+            NSApp.activate(ignoringOtherApps: true) // Bring app to front
+        }
+        // UserNotifications.shared.sendNotification(type: .long, duration: longBreakDuration) // Already handled by break window
+    }
+    
+    private func pauseForBreakConfirmation(breakType: BreakType) {
+        print("[BreakTimer] pauseForBreakConfirmation() called for breakType: \(String(describing: breakType))")
+        isWaitingForBreakConfirmation = true
+        lastBreakType = breakType // Set this so confirmBreakComplete knows which break was completed
+        let now = Date()
+
+        if breakType == .micro {
+            print("[BreakTimer] pauseForBreakConfirmation: Micro break occurred.")
+            microBreakTimer?.invalidate() // Stop the timer that just fired
+            microBreakTimer = nil
+            // Pause the long break timer
+            if let longStart = longBreakStartTime, !isLongBreakTimerPausedPendingOtherBreak {
+                longBreakAccumulatedElapsed += now.timeIntervalSince(longStart)
+                print("[BreakTimer] pauseForBreakConfirmation: Long break accumulating \(now.timeIntervalSince(longStart)). Total: \(longBreakAccumulatedElapsed)")
+            }
+            longBreakTimer?.invalidate() // Ensure it's stopped
+            longBreakTimer = nil
+            isLongBreakTimerPausedPendingOtherBreak = true
+            // longBreakStartTime remains, it's the basis for accumulated time
+
+        } else if breakType == .long {
+            print("[BreakTimer] pauseForBreakConfirmation: Long break occurred.")
+            longBreakTimer?.invalidate() // Stop the timer that just fired
+            longBreakTimer = nil
+            // Pause the micro break timer AND reset its accumulated progress
+            if microBreakStartTime != nil && !isMicroBreakTimerPausedPendingOtherBreak {
+                // The microBreakStartTime != nil check ensures there was a start time to begin with.
+                // The !isMicroBreakTimerPausedPendingOtherBreak check ensures it wasn't already paused for some other reason.
+                print("[BreakTimer] pauseForBreakConfirmation: Micro break was active (or had a start time), its accumulated time \(microBreakAccumulatedElapsed) will be reset to 0 due to long break.")
+            }
+            microBreakAccumulatedElapsed = 0 // Reset micro break progress
+            microBreakTimer?.invalidate() // Ensure it's stopped
+            microBreakTimer = nil
+            isMicroBreakTimerPausedPendingOtherBreak = true
+            print("[BreakTimer] pauseForBreakConfirmation: Micro break timer paused and its accumulated progress reset.")
+        } else {
+            print("[BreakTimer] pauseForBreakConfirmation: breakType is unexpected. THIS SHOULD NOT HAPPEN. Performing full stop.")
+            stop() // Fallback, but ideally breakType is always valid.
+        }
+        
+        displayUpdateTimer?.invalidate()
+        displayUpdateTimer = nil
+        print("[BreakTimer] pauseForBreakConfirmation: displayUpdateTimer stopped.")
+
+        appDelegate?.statusItem.button?.title = "✅"
+        appDelegate?.updateMenu()
+    }
+    
+    private func showNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        
+        let request = UNNotificationRequest(identifier: UUID().uuidString, 
+                                          content: content, 
+                                          trigger: nil)
+        
+        UNUserNotificationCenter.current().add(request)
+    }
+    
+    private func loadSettings() {
+        let defaults = UserDefaults.standard
+        microBreakInterval = defaults.double(forKey: "microBreakInterval") != 0 ? 
+            defaults.double(forKey: "microBreakInterval") : microBreakInterval
+        microBreakDuration = defaults.double(forKey: "microBreakDuration") != 0 ? 
+            defaults.double(forKey: "microBreakDuration") : microBreakDuration
+        longBreakInterval = defaults.double(forKey: "longBreakInterval") != 0 ? 
+            defaults.double(forKey: "longBreakInterval") : longBreakInterval
+        longBreakDuration = defaults.double(forKey: "longBreakDuration") != 0 ? 
+            defaults.double(forKey: "longBreakDuration") : longBreakDuration
+    }
+    
+    func saveSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(microBreakInterval, forKey: "microBreakInterval")
+        defaults.set(microBreakDuration, forKey: "microBreakDuration")
+        defaults.set(longBreakInterval, forKey: "longBreakInterval")
+        defaults.set(longBreakDuration, forKey: "longBreakDuration")
+    }
+    
+    // Login item management
+    func isStartOnLoginEnabled() -> Bool {
+        return UserDefaults.standard.bool(forKey: "startOnLogin")
+    }
+    
+    func isActuallyInLoginItems() -> Bool {
+        let script = """
+        tell application "System Events"
+            return name of login items contains "Refrain"
+        end tell
+        """
+        
+        var error: NSDictionary?
+        if let scriptObject = NSAppleScript(source: script) {
+            let output = scriptObject.executeAndReturnError(&error)
+            if let error = error {
+                print("Error checking login items: \(error)")
+                return false
+            }
+            return output.booleanValue
+        }
+        return false
+    }
+    
+    func setStartOnLogin(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "startOnLogin")
+        
+        if enabled {
+            addToLoginItems()
+        } else {
+            removeFromLoginItems()
+        }
+    }
+    
+    private func addToLoginItems() {
+        // First try the modern API
+        if #available(macOS 13.0, *) {
+            do {
+                try SMAppService.mainApp.register()
+                print("Successfully registered with SMAppService")
+                return
+            } catch {
+                print("SMAppService failed: \(error), trying AppleScript fallback")
+            }
+        }
+        
+        // Fallback to legacy API
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.tsteele.refrain" // Updated Bundle ID
+        let success = SMLoginItemSetEnabled(bundleIdentifier as CFString, true)
+        
+        if success {
+            print("Successfully registered with SMLoginItemSetEnabled")
+            return
+        }
+        
+        // Final fallback: Use AppleScript to add to login items
+        print("SMLoginItemSetEnabled failed, trying AppleScript fallback")
+        addToLoginItemsViaAppleScript()
+    }
+    
+    private func removeFromLoginItems() {
+        // First try the modern API
+        if #available(macOS 13.0, *) {
+            do {
+                try SMAppService.mainApp.unregister()
+                print("Successfully unregistered with SMAppService")
+                return
+            } catch {
+                print("SMAppService unregister failed: \(error), trying AppleScript fallback")
+            }
+        }
+        
+        // Fallback to legacy API
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.tsteele.refrain" // Updated Bundle ID
+        let success = SMLoginItemSetEnabled(bundleIdentifier as CFString, false)
+        
+        if success {
+            print("Successfully unregistered with SMLoginItemSetEnabled")
+            return
+        }
+        
+        // Final fallback: Use AppleScript to remove from login items
+        print("SMLoginItemSetEnabled failed, trying AppleScript fallback")
+        removeFromLoginItemsViaAppleScript()
+    }
+    
+    private func addToLoginItemsViaAppleScript() {
+        let appPath = Bundle.main.bundlePath
+        
+        let script = """
+        tell application "System Events"
+            make login item at end with properties {path:"\(appPath)", hidden:false}
+        end tell
+        """
+        
+        var error: NSDictionary?
+        if let scriptObject = NSAppleScript(source: script) {
+            let _ = scriptObject.executeAndReturnError(&error)
+            if let error = error {
+                print("AppleScript error adding login item: \(error)")
+            } else {
+                print("Successfully added to login items via AppleScript")
+            }
+        }
+    }
+    
+    private func removeFromLoginItemsViaAppleScript() {
+        let script = """
+        tell application "System Events"
+            delete login item "Refrain"
+        end tell
+        """
+        
+        var error: NSDictionary?
+        if let scriptObject = NSAppleScript(source: script) {
+            let _ = scriptObject.executeAndReturnError(&error)
+            if let error = error {
+                print("AppleScript error removing login item: \(error)")
+            } else {
+                print("Successfully removed from login items via AppleScript")
+            }
+        }
+    }
+    
+    func getCurrentBreakStats() -> BreakStats {
+        let now = Date()
+        var nextMicroInterval: TimeInterval
+        var nextLongInterval: TimeInterval
+
+        // --- Calculate time until next Micro Break ---
+        if isWaitingForBreakConfirmation && lastBreakType == .micro {
+            // If we are on the micro-break confirmation screen, the *next* micro break will be a full one after this.
+            nextMicroInterval = microBreakInterval 
+        } else if isMicroBreakTimerPausedPendingOtherBreak {
+            // Micro timer is explicitly paused (e.g., a long break is active/confirming).
+            // Its remaining time is based on what was accumulated before it was paused.
+            nextMicroInterval = max(0, microBreakInterval - microBreakAccumulatedElapsed)
+        } else if let microStart = microBreakStartTime {
+            // Micro timer is actively running or has a valid start reference for its current segment.
+            let elapsedOnCurrentSegment = now.timeIntervalSince(microStart)
+            nextMicroInterval = max(0, (microBreakInterval - microBreakAccumulatedElapsed) - elapsedOnCurrentSegment)
+        } else {
+            // Micro timer is not running and not specifically paused (e.g., app just started, or after a full stop/global pause).
+            // It will start fresh, considering any (unlikely here) accumulated time.
+            nextMicroInterval = max(0, microBreakInterval - microBreakAccumulatedElapsed) 
+        }
+
+        // --- Calculate time until next Long Break ---
+        if isWaitingForBreakConfirmation && lastBreakType == .long {
+            // If we are on the long-break confirmation screen, the *next* long break will be a full one.
+            nextLongInterval = longBreakInterval
+        } else if isLongBreakTimerPausedPendingOtherBreak {
+            // Long timer is explicitly paused (e.g., a micro break is active/confirming).
+            nextLongInterval = max(0, longBreakInterval - longBreakAccumulatedElapsed)
+        } else if let longStart = longBreakStartTime {
+            // Long timer is actively running or has a valid start reference.
+            let elapsedOnCurrentSegment = now.timeIntervalSince(longStart)
+            nextLongInterval = max(0, (longBreakInterval - longBreakAccumulatedElapsed) - elapsedOnCurrentSegment)
+        } else {
+            nextLongInterval = max(0, longBreakInterval - longBreakAccumulatedElapsed)
+        }
+        
+        // If waiting for confirmation for a specific break type, that break type's *own* timer
+        // is what we're currently experiencing. So, the "time until next" for *that* type
+        // should reflect the full interval that will start *after* this confirmation.
+        // The other timer's remaining time is what's relevant as an upcoming event.
+
+        return BreakStats(
+            microBreaksTaken: microBreaksTakenSession,
+            longBreaksTaken: longBreaksTakenSession,
+            timeUntilNextMicroBreak: nextMicroInterval,
+            timeUntilNextLongBreak: nextLongInterval,
+            currentBreakType: isWaitingForBreakConfirmation ? lastBreakType : nil
+        )
+    }
+    
+    func confirmBreakComplete() {
+        print("[BreakTimer] confirmBreakComplete() called - start")
+        
+        // Capture lastBreakType before it's nilled, to reset the correct accumulated time
+        let completedBreakType = lastBreakType 
+
+        // Increment break counts based on the break that just finished
+        if completedBreakType == .micro {
+            microBreaksTakenSession += 1
+            print("[BreakTimer] confirmBreakComplete: Micro break session count: \(microBreaksTakenSession)")
+        } else if completedBreakType == .long {
+            longBreaksTakenSession += 1
+            print("[BreakTimer] confirmBreakComplete: Long break session count: \(longBreaksTakenSession)")
+        }
+
+        let now = Date()
+        print("[BreakTimer] now = \(now)")
+        print("[BreakTimer] lastBreakType (before nil) = \(String(describing: completedBreakType))")
+
+        // Reset accumulated time for the break type that just finished
+        if completedBreakType == .micro {
+            microBreakAccumulatedElapsed = 0
+            print("[BreakTimer] confirmBreakComplete: Reset microBreakAccumulatedElapsed for next cycle.")
+        } else if completedBreakType == .long {
+            longBreakAccumulatedElapsed = 0
+            print("[BreakTimer] confirmBreakComplete: Reset longBreakAccumulatedElapsed for next cycle.")
+        }
+        
+        print("[BreakTimer] isWaitingForBreakConfirmation = \(isWaitingForBreakConfirmation)")
+        isWaitingForBreakConfirmation = false
+        print("[BreakTimer] lastBreakType set to nil")
+        self.lastBreakType = nil // Explicitly use self.lastBreakType to ensure we are setting the property
+        
+        print("[BreakTimer] isPaused = \(isPaused)")
+        if !isPaused {
+            print("[BreakTimer] calling start()")
+            start()
+        } else {
+            print("[BreakTimer] Was paused, so start() was not called.")
+        }
+
+        print("[BreakTimer] dispatching appDelegate.updateMenu() and currentBreakWindow = nil asynchronously")
+        DispatchQueue.main.async { [weak self] in 
+            guard let self = self else { 
+                print("[BreakTimer] DispatchQueue.main.async: self is nil, cannot proceed")
+                return 
+            }
+            print("[BreakTimer] DispatchQueue.main.async: calling appDelegate.updateMenu()")
+            self.appDelegate?.updateMenu()
+
+            print("[BreakTimer] DispatchQueue.main.async: Setting currentBreakWindow = nil NOW")
+            print("[BreakTimer] currentBreakWindow before nil = \(String(describing: self.currentBreakWindow))")
+            self.currentBreakWindow = nil
+            print("[BreakTimer] currentBreakWindow after nil = \(String(describing: self.currentBreakWindow))")
+        }
+        print("[BreakTimer] confirmBreakComplete() finished scheduling async tasks")
+    }
+}
+
+enum BreakType {
+    case micro, long
+}
+
+// Helper function to format TimeInterval into a human-readable string (e.g., "1h 5m 10s")
+// This can be a global function or a static method within a utility class
+func formatTimeInterval(_ interval: TimeInterval) -> String {
+    let ti = Int(interval)
+    let seconds = ti % 60
+    let minutes = (ti / 60) % 60
+    let hours = (ti / 3600)
+
+    var parts: [String] = []
+    if hours > 0 {
+        parts.append("\(hours)h")
+    }
+    if minutes > 0 {
+        parts.append("\(minutes)m")
+    }
+    if seconds > 0 || parts.isEmpty { // Show seconds if it's the only unit or if it's non-zero
+        parts.append("\(seconds)s")
+    }
+    return parts.joined(separator: " ")
+}
+
+class BreakWindow: NSObject { // Make it subclass NSObject if not already for unowned reference
+    private var window: NSWindow? // Make optional
+    private var dimmingWindows: [NSWindow] = []
+    // Declare UI elements that will be set up in setupMainWindow and then laid out in setupUI
+    private var titleLabel: NSTextField! 
+    private var countdownLabel: NSTextField!
+    // statsLabel is already declared
+    // skipButton and completeButton are already declared
+
+    private var timer: Timer?
+    private var remainingTime: TimeInterval
+    private let breakType: BreakType
+    unowned var breakTimer: BreakTimer
+    let stats: BreakStats // Store the passed stats
+    var statsLabel: NSTextField!
+
+    private var skipButton: NSButton? // Make optional
+    private var completeButton: NSButton? // Make optional
+    
+    init(duration: TimeInterval, breakType: BreakType, breakTimer: BreakTimer, stats: BreakStats) {
+        self.remainingTime = duration
+        self.breakType = breakType
+        self.breakTimer = breakTimer
+        self.stats = stats // Store stats
+        super.init()
+        setupWindows() 
+        setupUI() // Call setupUI after windows are created
+    }
+    
+    private func setupWindows() {
+        // Get all screens
+        let screens = NSScreen.screens
+        guard let mainScreen = NSScreen.main else { return }
+        
+        // Create main break window on primary monitor
+        setupMainWindow(on: mainScreen) // This will now just create elements, not layout
+        
+        // Create dimming windows for all other monitors
+        for screen in screens {
+            if screen != mainScreen {
+                setupDimmingWindow(on: screen)
+            }
+        }
+    }
+    
+    private func setupMainWindow(on screen: NSScreen) {
+        window = NSWindow(contentRect: screen.frame,
+                         styleMask: [.borderless],
+                         backing: .buffered,
+                         defer: false)
+        guard let strongWindow = window else { return }
+        strongWindow.isReleasedWhenClosed = false
+        strongWindow.level = .screenSaver
+        strongWindow.backgroundColor = breakType == .micro ? 
+            NSColor.black.withAlphaComponent(0.8) : 
+            NSColor.black.withAlphaComponent(0.9)
+        
+        let contentView = NSView(frame: screen.frame)
+        strongWindow.contentView = contentView
+        
+        // Create UI elements but do not add to subview or set constraints here.
+        // setupUI will handle that.
+        titleLabel = NSTextField(labelWithString: breakType == .micro ? 
+            "Micro Break - Rest Your Eyes" : "Break Time - Step Away From Screen")
+        titleLabel.font = NSFont.systemFont(ofSize: 48, weight: .bold)
+        titleLabel.textColor = .white
+        titleLabel.alignment = .center
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        // contentView.addSubview(titleLabel) // Moved to setupUI
+        
+        countdownLabel = NSTextField(labelWithString: formatTime(remainingTime))
+        countdownLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 72, weight: .medium)
+        countdownLabel.textColor = .white
+        countdownLabel.alignment = .center
+        countdownLabel.translatesAutoresizingMaskIntoConstraints = false
+        // contentView.addSubview(countdownLabel) // Moved to setupUI
+        
+        skipButton = NSButton(title: "Skip Break", target: self, action: #selector(skipBreak))
+        skipButton?.bezelStyle = .rounded
+        skipButton?.translatesAutoresizingMaskIntoConstraints = false
+        // if let sb = skipButton { contentView.addSubview(sb) } // Moved to setupUI
+        
+        completeButton = NSButton(title: "Break Complete", target: self, action: #selector(completeBreak))
+        completeButton?.bezelStyle = .rounded
+        completeButton?.keyEquivalent = "\r"
+        completeButton?.translatesAutoresizingMaskIntoConstraints = false
+        // if let cb = completeButton { contentView.addSubview(cb) } // Moved to setupUI
+        
+        // Remove all NSLayoutConstraint.activate from here. setupUI will handle all layout.
+    }
+    
+    private func setupDimmingWindow(on screen: NSScreen) {
+        let dimmingWindow = NSWindow(contentRect: screen.frame,
+                                   styleMask: [.borderless],
+                                   backing: .buffered,
+                                   defer: false)
+        dimmingWindow.isReleasedWhenClosed = false
+        dimmingWindow.level = .screenSaver
+        dimmingWindow.backgroundColor = NSColor.black.withAlphaComponent(0.7)
+        dimmingWindow.ignoresMouseEvents = true
+        dimmingWindows.append(dimmingWindow)
+    }
+    
+    func show() {
+        window?.makeKeyAndOrderFront(nil)
+        for dimmingWindow in dimmingWindows {
+            dimmingWindow.orderFront(nil)
+        }
+        startCountdown()
+    }
+    
+    private func startCountdown() {
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.remainingTime -= 1
+            self.countdownLabel.stringValue = self.formatTime(self.remainingTime)
+            
+            if self.remainingTime <= 0 {
+                // Stop countdown but don't auto-dismiss
+                self.timer?.invalidate()
+                self.countdownLabel.stringValue = "Break time is up!"
+                self.countdownLabel.textColor = .systemGreen
+            }
+        }
+    }
+    
+    @objc private func skipBreak() {
+        print("[BreakWindow] skipBreak() called")
+        dismiss()
+        breakTimer.confirmBreakComplete()
+    }
+    
+    @objc private func completeBreak() {
+        print("[BreakWindow] completeBreak() called")
+        dismiss()
+        breakTimer.confirmBreakComplete()
+    }
+    
+    private func dismiss() {
+        print("[BreakWindow] dismiss() called")
+        timer?.invalidate()
+        timer = nil
+        print("[BreakWindow] Countdown timer invalidated and nilled")
+
+        skipButton?.target = nil
+        completeButton?.target = nil
+        print("[BreakWindow] Button targets nilled")
+
+        if let strongWindow = window {
+            strongWindow.contentView?.subviews.forEach { $0.removeFromSuperview() }
+            strongWindow.contentView = nil
+            print("[BreakWindow] ContentView cleared and nilled")
+            strongWindow.close()
+            self.window = nil // Release our strong reference to the NSWindow
+            print("[BreakWindow] Main NSWindow closed and nilled")
+        }
+        
+        for i in stride(from: dimmingWindows.count - 1, through: 0, by: -1) {
+            let dimmingWin = dimmingWindows.remove(at: i)
+            dimmingWin.contentView?.subviews.forEach { $0.removeFromSuperview() }
+            dimmingWin.contentView = nil
+            dimmingWin.close()
+        }
+        print("[BreakWindow] Dimming windows closed, contentView cleared, and cleared from array")
+    }
+    
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+    
+    deinit {
+        print("[BreakWindow] deinit called")
+    }
+    
+    private func setupUI() {
+        guard let contentView = window?.contentView else { 
+            print("[BreakWindow] setupUI: contentView is nil!")
+            return 
+        }
+
+        // Add all UI elements to the contentView
+        contentView.addSubview(titleLabel)
+        contentView.addSubview(countdownLabel)
+
+        // Stats Label (Initialization and adding to subview)
+        statsLabel = NSTextField(labelWithString: "") // Initialize
+        statsLabel.font = NSFont.systemFont(ofSize: 16)
+        statsLabel.textColor = .white
+        statsLabel.alignment = .center
+        statsLabel.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(statsLabel)
+
+        // Populate stats label
+        statsLabel.stringValue = "Breaks Taken: 👁️ \(stats.microBreaksTaken) | ☕️ \(stats.longBreaksTaken)\n" + {
+            if stats.currentBreakType == .micro {
+                return "Next Long Break: \(formatTimeInterval(stats.timeUntilNextLongBreak)) (after this micro break: \(formatTimeInterval(stats.timeUntilNextMicroBreak)))"
+            } else if stats.currentBreakType == .long {
+                return "Next Micro Break: \(formatTimeInterval(stats.timeUntilNextMicroBreak)) (after this long break: \(formatTimeInterval(stats.timeUntilNextLongBreak)))"
+            } else {
+                // Fallback, should ideally not be reached if break window is shown for a specific break type
+                return "Next: 👁️ \(formatTimeInterval(stats.timeUntilNextMicroBreak)) | ☕️ \(formatTimeInterval(stats.timeUntilNextLongBreak))"
+            }
+        }() // Immediately-invoked closure
+        
+        statsLabel.lineBreakMode = .byWordWrapping
+        statsLabel.maximumNumberOfLines = 0
+
+        // Add buttons to contentView
+        if let sb = skipButton { contentView.addSubview(sb) }
+        if let cb = completeButton { contentView.addSubview(cb) }
+
+
+        // --- Layout ALL elements ---
+        NSLayoutConstraint.activate([
+            // Title Label
+            titleLabel.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            titleLabel.bottomAnchor.constraint(equalTo: countdownLabel.topAnchor, constant: -30), // Position above countdown
+
+            // Countdown Label
+            countdownLabel.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            countdownLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor), // Vertically centered
+
+            // Stats Label Constraints (Position below countdownLabel)
+            statsLabel.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            statsLabel.topAnchor.constraint(equalTo: countdownLabel.bottomAnchor, constant: 30), 
+            statsLabel.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 20),
+            statsLabel.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -20),
+
+            // Complete Button (Below statsLabel)
+            completeButton!.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            completeButton!.topAnchor.constraint(equalTo: statsLabel.bottomAnchor, constant: 40),
+
+            // Skip Button (Below completeButton)
+            skipButton!.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            skipButton!.topAnchor.constraint(equalTo: completeButton!.bottomAnchor, constant: 20)
+        ])
+        
+        // The old code to deactivate constraints is no longer needed as setupMainWindow doesn't set them.
+    }
+}
+
+class PreferencesViewController: NSViewController {
+    private var microBreakIntervalField: NSTextField!
+    private var microBreakDurationField: NSTextField!
+    private var longBreakIntervalField: NSTextField!
+    private var longBreakDurationField: NSTextField!
+    private var startOnLoginCheckbox: NSButton!
+    
+    override func loadView() {
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 350))
+    }
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        setupUI()
+        loadCurrentSettings()
+    }
+    
+    private func setupUI() {
+        let stackView = NSStackView()
+        stackView.orientation = .vertical
+        stackView.spacing = 20
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stackView)
+        
+        // Micro break settings
+        let microBreakLabel = NSTextField(labelWithString: "Micro Break Settings")
+        microBreakLabel.font = NSFont.boldSystemFont(ofSize: 16)
+        stackView.addArrangedSubview(microBreakLabel)
+        
+        let microIntervalStack = createLabeledField(label: "Interval (minutes):", 
+                                                   field: &microBreakIntervalField)
+        stackView.addArrangedSubview(microIntervalStack)
+        
+        let microDurationStack = createLabeledField(label: "Duration (seconds):", 
+                                                   field: &microBreakDurationField)
+        stackView.addArrangedSubview(microDurationStack)
+        
+        // Long break settings
+        let longBreakLabel = NSTextField(labelWithString: "Long Break Settings")
+        longBreakLabel.font = NSFont.boldSystemFont(ofSize: 16)
+        stackView.addArrangedSubview(longBreakLabel)
+        
+        let longIntervalStack = createLabeledField(label: "Interval (minutes):", 
+                                                  field: &longBreakIntervalField)
+        stackView.addArrangedSubview(longIntervalStack)
+        
+        let longDurationStack = createLabeledField(label: "Duration (minutes):", 
+                                                  field: &longBreakDurationField)
+        stackView.addArrangedSubview(longDurationStack)
+        
+        // Start on Login checkbox
+        let startOnLoginLabel = NSTextField(labelWithString: "General Settings")
+        startOnLoginLabel.font = NSFont.boldSystemFont(ofSize: 16)
+        stackView.addArrangedSubview(startOnLoginLabel)
+        
+        startOnLoginCheckbox = NSButton(checkboxWithTitle: "Start Refrain on Login", target: self, action: #selector(toggleStartOnLogin)) // Updated App Name
+        stackView.addArrangedSubview(startOnLoginCheckbox)
+        
+        // Save button
+        let saveButton = NSButton(title: "Save", target: self, action: #selector(saveSettings))
+        saveButton.bezelStyle = .rounded
+        stackView.addArrangedSubview(saveButton)
+        
+        // Layout
+        NSLayoutConstraint.activate([
+            stackView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stackView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            stackView.widthAnchor.constraint(equalToConstant: 300)
+        ])
+    }
+    
+    private func createLabeledField(label: String, field: inout NSTextField!) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 10
+        
+        let labelView = NSTextField(labelWithString: label)
+        labelView.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        
+        field = NSTextField()
+        field.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        
+        stack.addArrangedSubview(labelView)
+        stack.addArrangedSubview(field)
+        
+        return stack
+    }
+    
+    private func loadCurrentSettings() {
+        let appDelegate = NSApp.delegate as! AppDelegate
+        let breakTimer = appDelegate.breakTimer!
+        
+        microBreakIntervalField.stringValue = String(Int(breakTimer.microBreakInterval / 60))
+        microBreakDurationField.stringValue = String(Int(breakTimer.microBreakDuration))
+        longBreakIntervalField.stringValue = String(Int(breakTimer.longBreakInterval / 60))
+        longBreakDurationField.stringValue = String(Int(breakTimer.longBreakDuration / 60))
+        
+        // Check both the saved preference and actual login items status
+        let savedPreference = breakTimer.isStartOnLoginEnabled()
+        let actuallyInLoginItems = breakTimer.isActuallyInLoginItems()
+        
+        startOnLoginCheckbox.state = actuallyInLoginItems ? .on : .off
+        
+        // If there's a mismatch, update the saved preference to match reality
+        if savedPreference != actuallyInLoginItems {
+            UserDefaults.standard.set(actuallyInLoginItems, forKey: "startOnLogin")
+        }
+        
+        // Update the checkbox title to show status
+        if actuallyInLoginItems {
+            startOnLoginCheckbox.title = "Start Refrain on Login ✅" // Updated App Name
+        } else {
+            startOnLoginCheckbox.title = "Start Refrain on Login" // Updated App Name
+        }
+    }
+    
+    @objc private func toggleStartOnLogin() {
+        let appDelegate = NSApp.delegate as! AppDelegate
+        let breakTimer = appDelegate.breakTimer!
+        let isEnabled = startOnLoginCheckbox.state == .on
+        
+        breakTimer.setStartOnLogin(isEnabled)
+        
+        // Give the system a moment to process, then check if it worked
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            let actuallyInLoginItems = breakTimer.isActuallyInLoginItems()
+            
+            if actuallyInLoginItems == isEnabled {
+                // Success!
+                self.startOnLoginCheckbox.title = actuallyInLoginItems ? 
+                    "Start Refrain on Login ✅" : "Start Refrain on Login" // Updated App Name
+            } else {
+                // Failed - show manual instructions
+                self.showManualInstructions()
+                // Reset checkbox to actual state
+                self.startOnLoginCheckbox.state = actuallyInLoginItems ? .on : .off
+                self.startOnLoginCheckbox.title = actuallyInLoginItems ? 
+                    "Start Refrain on Login ✅" : "Start Refrain on Login" // Updated App Name
+            }
+        }
+    }
+    
+    private func showManualInstructions() {
+        let alert = NSAlert()
+        alert.messageText = "Manual Setup Required"
+        alert.informativeText = """
+        The automatic login item setup didn't work. You can add Refrain to login items manually:
+        
+        1. Open System Preferences → Users & Groups
+        2. Click your user account
+        3. Click "Login Items" tab
+        4. Click the "+" button
+        5. Navigate to and select Refrain.app
+        
+        Or copy Refrain.app to your Applications folder first, then try again.
+        """ // Updated App Name
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+    
+    @objc private func saveSettings() {
+        let appDelegate = NSApp.delegate as! AppDelegate
+        let breakTimer = appDelegate.breakTimer!
+        
+        if let microInterval = Double(microBreakIntervalField.stringValue) {
+            breakTimer.microBreakInterval = microInterval * 60
+        }
+        if let microDuration = Double(microBreakDurationField.stringValue) {
+            breakTimer.microBreakDuration = microDuration
+        }
+        if let longInterval = Double(longBreakIntervalField.stringValue) {
+            breakTimer.longBreakInterval = longInterval * 60
+        }
+        if let longDuration = Double(longBreakDurationField.stringValue) {
+            breakTimer.longBreakDuration = longDuration * 60
+        }
+        
+        // Save start on login preference
+        let isStartOnLoginEnabled = startOnLoginCheckbox.state == .on
+        breakTimer.setStartOnLogin(isStartOnLoginEnabled)
+        
+        breakTimer.saveSettings()
+        breakTimer.stop()
+        breakTimer.start()
+        
+        view.window?.close()
+    }
+}
+
+// App initialization
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.run() 
