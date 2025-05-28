@@ -1,6 +1,7 @@
 import Cocoa
 import UserNotifications
 import ServiceManagement
+import IOKit
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
@@ -217,6 +218,8 @@ class BreakTimer {
     private var currentBreakWindow: BreakWindow?
     var isPaused = false // Global pause state (e.g., user manually pauses all breaks)
     var isWaitingForBreakConfirmation = false
+    var isPausedDueToIdle = false // New state for idle pause
+    let idleThreshold: TimeInterval = 60.0 // Pause timers if idle for 60 seconds
     
     var microBreakInterval: TimeInterval = 20 * 60 
     var microBreakDuration: TimeInterval = 20 
@@ -257,6 +260,7 @@ class BreakTimer {
         longBreakAccumulatedElapsed = 0
         isMicroBreakTimerPausedPendingOtherBreak = false
         isLongBreakTimerPausedPendingOtherBreak = false
+        isPausedDueToIdle = false // Reset idle pause flag on full stop
         print("[BreakTimer] stop(): All timers, start times, and accumulated states reset.")
     }
     
@@ -266,8 +270,11 @@ class BreakTimer {
             guard let self = self else { return }
             print("[BreakTimer] start() - async block executing")
             
-            // DO NOT call self.stop() here as it would reset accumulated progress.
-            // Invalidation of specific timers is handled by pauseForBreakConfirmation or by global pause.
+            // If we are starting due to coming back from idle, reset the flag
+            if self.isPausedDueToIdle {
+                print("[BreakTimer] start() - async: Resuming from idle. Resetting isPausedDueToIdle.")
+                self.isPausedDueToIdle = false
+            }
 
             // Reset "paused pending other break" flags at the beginning of start().
             // Their purpose was to prevent (re)scheduling during an active break of the other type.
@@ -334,11 +341,11 @@ class BreakTimer {
             }
             // self.isLongBreakTimerPausedPendingOtherBreak = false // Already done at the start of this async block
             
-            // Display Update Timer - always runs if not globally paused
-            print("[BreakTimer] start() - async: scheduling displayUpdateTimer")
+            // Display Update Timer - also handles idle checking
+            print("[BreakTimer] start() - async: scheduling displayUpdateTimer (and idle checker)")
             self.displayUpdateTimer?.invalidate() // Ensure no duplicates
             self.displayUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                self?.updateMenuBarDisplay()
+                self?.checkIdleTimeAndupdateMenuBarDisplay()
             }
             print("[BreakTimer] start() - async: displayUpdateTimer scheduled successfully")
             
@@ -352,18 +359,89 @@ class BreakTimer {
         print("[BreakTimer] togglePause() called. isPaused was \(isPaused)")
         isPaused.toggle()
         if isPaused {
-            print("[BreakTimer] togglePause(): Now PAUSED")
-            stop() // This will nil out timers and start times
+            print("[BreakTimer] togglePause(): Now PAUSED (globally)")
+            // If we are globally pausing, ensure idle pause is also cleared/reset
+            // as global pause takes precedence.
+            if isPausedDueToIdle {
+                isPausedDueToIdle = false 
+                print("[BreakTimer] togglePause(): Clearing isPausedDueToIdle because global pause is being activated.")
+            }
+            stop() // This will nil out timers and start times, and also reset isPausedDueToIdle
             appDelegate?.statusItem.button?.title = "⏸️"
-            // No need to call updateMenuBarDisplay as stop + title set is enough for paused state indication
         } else {
-            print("[BreakTimer] togglePause(): Now RESUMING")
-            // When resuming, we want new start times for a fresh cycle from this point.
-            // start() will handle setting new start times and scheduling timers.
+            print("[BreakTimer] togglePause(): Now RESUMING (globally)")
+            // isPausedDueToIdle should be false here if stop() was called.
+            // start() will handle new start times and scheduling.
             start()
         }
-        appDelegate?.updateMenu() // Always update menu to reflect Pause/Resume text and timer states
+        appDelegate?.updateMenu()
         print("[BreakTimer] togglePause() finished. isPaused is now \(isPaused)")
+    }
+    
+    private func checkIdleTimeAndupdateMenuBarDisplay() {
+        // Priority:
+        // 1. Global pause (isPaused)
+        // 2. Waiting for break confirmation (isWaitingForBreakConfirmation)
+        // 3. Idle pause (isPausedDueToIdle)
+        // 4. Active timers
+
+        if isPaused { // Globally paused, no need to check idle or update countdowns
+            updateMenuBarDisplay()
+            return
+        }
+
+        if isWaitingForBreakConfirmation { // Break confirmation takes precedence over idle detection for now
+            updateMenuBarDisplay()
+            return
+        }
+
+        // Check for idle time
+        if let currentIdleTime = getSystemIdleTime() {
+            // print("[BreakTimer] Idle time: \(currentIdleTime)s. Threshold: \(idleThreshold)s") // DEBUG
+            if currentIdleTime > idleThreshold {
+                if !isPausedDueToIdle {
+                    print("[BreakTimer] Idle threshold exceeded. Pausing timers due to idle.")
+                    isPausedDueToIdle = true
+                    
+                    let now = Date()
+                    if let microStart = microBreakStartTime, !isMicroBreakTimerPausedPendingOtherBreak {
+                        let elapsed = now.timeIntervalSince(microStart)
+                        microBreakAccumulatedElapsed += elapsed
+                        print("[BreakTimer] Idle Pause: Micro break accumulating \(elapsed)s. Total: \(microBreakAccumulatedElapsed)s")
+                    }
+                    if let longStart = longBreakStartTime, !isLongBreakTimerPausedPendingOtherBreak {
+                        let elapsed = now.timeIntervalSince(longStart)
+                        longBreakAccumulatedElapsed += elapsed
+                        print("[BreakTimer] Idle Pause: Long break accumulating \(elapsed)s. Total: \(longBreakAccumulatedElapsed)s")
+                    }
+
+                    microBreakTimer?.invalidate()
+                    longBreakTimer?.invalidate()
+                    microBreakTimer = nil
+                    longBreakTimer = nil
+                    microBreakStartTime = nil
+                    longBreakStartTime = nil
+
+                    print("[BreakTimer] Timers paused due to idle. Accumulated times captured.")
+                    appDelegate?.updateMenu()
+                }
+                updateMenuBarDisplay()
+                return 
+            } else {
+                if isPausedDueToIdle {
+                    print("[BreakTimer] System active again. Resuming timers from idle pause.")
+                    isPausedDueToIdle = false 
+                    start()
+                    updateMenuBarDisplay() 
+                    appDelegate?.updateMenu()
+                    return 
+                }
+            }
+        } else {
+            print("[BreakTimer] Could not get system idle time.")
+        }
+        
+        updateMenuBarDisplay()
     }
     
     private func updateMenuBarDisplay() {
@@ -409,6 +487,11 @@ class BreakTimer {
         if isPaused { // Global pause
              appDelegate.statusItem.button?.title = "⏸️"
              return
+        }
+
+        if isPausedDueToIdle { 
+            appDelegate.statusItem.button?.title = "😴 Idle"
+            return
         }
 
         // If not waiting for confirmation and not globally paused, show the next break countdown.
@@ -468,6 +551,12 @@ class BreakTimer {
     
     private func pauseForBreakConfirmation(breakType: BreakType) {
         print("[BreakTimer] pauseForBreakConfirmation() called for breakType: \(String(describing: breakType))")
+        
+        if isPausedDueToIdle {
+            print("[BreakTimer] pauseForBreakConfirmation: Clearing isPausedDueToIdle as a break is starting.")
+            isPausedDueToIdle = false 
+        }
+
         isWaitingForBreakConfirmation = true
         lastBreakType = breakType // Set this so confirmBreakComplete knows which break was completed
         let now = Date()
@@ -805,6 +894,31 @@ func formatTimeInterval(_ interval: TimeInterval) -> String {
         parts.append("\(seconds)s")
     }
     return parts.joined(separator: " ")
+}
+
+// Function to get system idle time in seconds
+public func getSystemIdleTime() -> Double? {
+    var iterator: io_iterator_t = 0
+    defer { IOObjectRelease(iterator) }
+    guard IOServiceGetMatchingServices(kIOMasterPortDefault, IOServiceMatching("IOHIDSystem"), &iterator) == KERN_SUCCESS else { return nil }
+
+    let entry: io_registry_entry_t = IOIteratorNext(iterator)
+    defer { IOObjectRelease(entry) }
+    guard entry != 0 else { return nil }
+
+    var props: Unmanaged<CFMutableDictionary>?
+    guard IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS else { return nil }
+    guard let dict = props?.takeRetainedValue() else { return nil }
+
+    let key = "HIDIdleTime" as CFString
+    guard let value = CFDictionaryGetValue(dict, Unmanaged.passUnretained(key).toOpaque()) else { return nil }
+    
+    let number: CFNumber = unsafeBitCast(value, to: CFNumber.self)
+    var nanoseconds: Int64 = 0
+    guard CFNumberGetValue(number, .sInt64Type, &nanoseconds) else { return nil }
+    let interval = Double(nanoseconds) / Double(NSEC_PER_SEC)
+    
+    return interval
 }
 
 class BreakWindow: NSObject { // Make it subclass NSObject if not already for unowned reference
