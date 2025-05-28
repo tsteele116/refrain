@@ -85,17 +85,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(longBreakMenuItem!)
             
             menu.addItem(NSMenuItem.separator())
-        } else if breakTimer.isPaused {
-            // Show paused state
+        } else if breakTimer.isPaused { // Covers global pause
             pausedMenuItem = NSMenuItem(title: "⏸️ Breaks Paused", action: nil, keyEquivalent: "")
             pausedMenuItem!.isEnabled = false
             menu.addItem(pausedMenuItem!)
             menu.addItem(NSMenuItem.separator())
+        } else if breakTimer.isPausedDueToIdle { // Added check for idle pause for menu display
+             pausedMenuItem = NSMenuItem(title: "😴 Idle (Timers Paused)", action: nil, keyEquivalent: "")
+             pausedMenuItem!.isEnabled = false
+             menu.addItem(pausedMenuItem!)
+             menu.addItem(NSMenuItem.separator())
         }
         
         // Add control items
         menu.addItem(NSMenuItem(title: "Preferences", action: #selector(showPreferences), keyEquivalent: ""))
         
+        // Manual break start options
+        // Enabled if not waiting for confirmation and not globally paused.
+        // If idle, still allow manual start (user interaction implies not idle anymore, and BreakTimer handles idle state changes).
+        let canManuallyStartBreak = !breakTimer.isWaitingForBreakConfirmation && !breakTimer.isPaused
+        
+        let startMicroBreakItem = NSMenuItem(title: "Start Micro Break Now", action: #selector(startMicroBreakNow), keyEquivalent: "")
+        startMicroBreakItem.isEnabled = canManuallyStartBreak
+        menu.addItem(startMicroBreakItem)
+        
+        let startLongBreakItem = NSMenuItem(title: "Start Long Break Now", action: #selector(startLongBreakNow), keyEquivalent: "")
+        startLongBreakItem.isEnabled = canManuallyStartBreak
+        menu.addItem(startLongBreakItem)
+        
+        menu.addItem(NSMenuItem.separator()) // Separator before pause/quit
+
         if breakTimer.isWaitingForBreakConfirmation {
             // Don't show pause/resume when waiting for confirmation
         } else {
@@ -194,6 +213,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     
     @objc func confirmBreakComplete() {
         breakTimer.confirmBreakComplete()
+    }
+    
+    @objc func startMicroBreakNow() {
+        print("[AppDelegate] User requested to start Micro Break now.")
+        if breakTimer.isPausedDueToIdle {
+            print("[AppDelegate] Clearing idle pause flag before starting manual micro break.")
+            breakTimer.isPausedDueToIdle = false
+            // The call to showMicroBreak() will handle pausing other timers and setting up the break state.
+            // It internally calls pauseForBreakConfirmation which also clears isPausedDueToIdle.
+            // The displayUpdateTimer will eventually resume normal operation if user remains active.
+        }
+        breakTimer.showMicroBreak()
+        // updateMenu() is handled by the chain of calls originating from showMicroBreak()
+    }
+
+    @objc func startLongBreakNow() {
+        print("[AppDelegate] User requested to start Long Break now.")
+        if breakTimer.isPausedDueToIdle {
+            print("[AppDelegate] Clearing idle pause flag before starting manual long break.")
+            breakTimer.isPausedDueToIdle = false
+        }
+        breakTimer.showLongBreak()
+        // updateMenu() is handled by the chain of calls originating from showLongBreak()
     }
     
     func applicationWillTerminate(_ aNotification: Notification) {
@@ -937,7 +979,7 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
     let stats: BreakStats // Store the passed stats
     var statsLabel: NSTextField!
 
-    private var skipButton: NSButton? // Make optional
+    // private var skipButton: NSButton? // Make optional // REMOVED
     private var completeButton: NSButton? // Make optional
     
     init(duration: TimeInterval, breakType: BreakType, breakTimer: BreakTimer, stats: BreakStats) {
@@ -998,10 +1040,10 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
         countdownLabel.translatesAutoresizingMaskIntoConstraints = false
         // contentView.addSubview(countdownLabel) // Moved to setupUI
         
-        skipButton = NSButton(title: "Skip Break", target: self, action: #selector(skipBreak))
-        skipButton?.bezelStyle = .rounded
-        skipButton?.translatesAutoresizingMaskIntoConstraints = false
-        // if let sb = skipButton { contentView.addSubview(sb) } // Moved to setupUI
+        // skipButton = NSButton(title: "Skip Break", target: self, action: #selector(skipBreak)) // REMOVED
+        // skipButton?.bezelStyle = .rounded // REMOVED
+        // skipButton?.translatesAutoresizingMaskIntoConstraints = false // REMOVED
+        // if let sb = skipButton { contentView.addSubview(sb) } // Moved to setupUI // REMOVED
         
         completeButton = NSButton(title: "Break Complete", target: self, action: #selector(completeBreak))
         completeButton?.bezelStyle = .rounded
@@ -1047,11 +1089,11 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
         }
     }
     
-    @objc private func skipBreak() {
-        print("[BreakWindow] skipBreak() called")
-        dismiss()
-        breakTimer.confirmBreakComplete()
-    }
+    // @objc private func skipBreak() { // REMOVED
+    //     print("[BreakWindow] skipBreak() called") // REMOVED
+    //     dismiss() // REMOVED
+    //     breakTimer.confirmBreakComplete() // REMOVED
+    // } // REMOVED
     
     @objc private func completeBreak() {
         print("[BreakWindow] completeBreak() called")
@@ -1065,7 +1107,7 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
         timer = nil
         print("[BreakWindow] Countdown timer invalidated and nilled")
 
-        skipButton?.target = nil
+        // skipButton?.target = nil // REMOVED
         completeButton?.target = nil
         print("[BreakWindow] Button targets nilled")
 
@@ -1131,7 +1173,7 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
         statsLabel.maximumNumberOfLines = 0
 
         // Add buttons to contentView
-        if let sb = skipButton { contentView.addSubview(sb) }
+        // if let sb = skipButton { contentView.addSubview(sb) } // REMOVED
         if let cb = completeButton { contentView.addSubview(cb) }
 
 
@@ -1155,9 +1197,9 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
             completeButton!.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             completeButton!.topAnchor.constraint(equalTo: statsLabel.bottomAnchor, constant: 40),
 
-            // Skip Button (Below completeButton)
-            skipButton!.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            skipButton!.topAnchor.constraint(equalTo: completeButton!.bottomAnchor, constant: 20)
+            // Skip Button (Below completeButton) // REMOVED
+            // skipButton!.centerXAnchor.constraint(equalTo: contentView.centerXAnchor), // REMOVED
+            // skipButton!.topAnchor.constraint(equalTo: completeButton!.bottomAnchor, constant: 20) // REMOVED
         ])
         
         // The old code to deactivate constraints is no longer needed as setupMainWindow doesn't set them.
