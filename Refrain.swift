@@ -1101,7 +1101,7 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
         breakTimer.confirmBreakComplete()
     }
     
-    private func dismiss() {
+    func dismiss() {
         print("[BreakWindow] dismiss() called")
         timer?.invalidate()
         timer = nil

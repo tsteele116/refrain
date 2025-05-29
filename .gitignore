@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+*.swp
+
+# Build artifacts
+Refrain.app/
+Refrain.app
+*.dSYM/
+
+# Swift Package Manager
+.build/
+Packages/
+*.xcodeproj/
+xcuserdata/ 
