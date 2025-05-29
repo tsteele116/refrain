@@ -2,119 +2,130 @@
 
 An admittedly vibe-coded native macOS application that reminds you to take regular screen breaks
 
+## Installation
+
+**RECOMMENDED METHOD (for most users):**
+
+1.  Go to the project's GitHub Releases page:
+    [https://github.com/tsteele116/refrain/releases](https://github.com/tsteele116/refrain/releases)
+2.  Download the latest `Refrain.app.zip` file.
+3.  Unzip the file to get `Refrain.app`.
+4.  Drag `Refrain.app` to your **Applications** folder.
+5.  Right-click (or Control-click) `Refrain.app` and select "Open".
+    *   You might need to do this twice or confirm in System Settings > Privacy & Security due to Gatekeeper for the first launch.
+
+**DEVELOPER METHOD (if building from source):**
+
+1.  Ensure you have Xcode command line tools installed:
+    ```bash
+    xcode-select --install
+    ```
+2.  Clone the repository.
+3.  Make the build script executable and run it:
+    ```bash
+    chmod +x build.sh
+    ./build.sh
+    ```
+4.  The script will create `Refrain.app` in the project directory.
+5.  Copy `Refrain.app` to your Applications folder and open it as described above.
+
 ## Features
 
 - **Two types of breaks:**
-  - Micro breaks: 20-second eye rest breaks every 20 minutes (default)
-  - Long breaks: 10-minute breaks every 60 minutes (default)
-- **Fully configurable intervals and durations**
+  - Micro breaks (e.g., 20-second eye rest every 20 minutes)
+  - Long breaks (e.g., 10-minute away-from-screen break every 60 minutes)
+- **Fully configurable intervals and durations** via Preferences.
 - **Native macOS integration:**
-  - Menu bar app with live countdown timer
-  - System notifications
-  - Full-screen break windows with countdown timers
-- **Live countdown display**: Menu bar shows time until next break with visual icons
-  - 👁️ for micro breaks (eye rest)
-  - ☕️ for long breaks
-  - ⏸️ when paused
-- **Pause/resume functionality**
-- **Skip break option** during break windows
-- **Persistent settings** saved between app launches
-- **Start on Login** option to automatically launch with macOS
-
-## Building the App
-
-1. Make sure you have Xcode command line tools installed:
-   ```bash
-   xcode-select --install
-   ```
-
-2. Make the build script executable and run it:
-   ```bash
-   chmod +x build.sh
-   ./build.sh
-   ```
-
-3. The script will create `Refrain.app` in the current directory.
-
-## Installation
-
-1. Copy `Refrain.app` to your Applications folder
-2. Right-click the app and select "Open" the first time to bypass Gatekeeper
-3. The app will appear in your menu bar with a countdown timer showing time until next break
+  - Menu bar app with live countdown timer.
+  - System notifications for break alerts.
+  - Full-screen break windows with a countdown timer and a "Break Complete" button.
+- **Dynamic Menu Bar Display:** Shows time until the *next* scheduled break with visual icons:
+  - 👁️ for upcoming micro breaks.
+  - ☕️ for upcoming long breaks.
+  - ✅ when a break is complete and awaiting confirmation.
+  - 😴 when timers are paused due to system idle.
+  - ⏸️ when breaks are manually paused.
+- **Menu Bar Controls:**
+  - Live countdowns for both micro and long breaks in the dropdown menu.
+  - Pause/Resume all breaks.
+  - Manually **Start Micro Break Now** or **Start Long Break Now**.
+  - **Reset All Timers** to their initial state.
+  - Access Preferences.
+  - Quit.
+- **Idle Detection:** Timers automatically pause if the Mac is idle for a configurable duration (default: 60 seconds) and resume when activity is detected.
+- **Persistent Settings:** All configurations are saved between app launches.
+- **Start on Login:** Option to automatically launch Refrain when you log into macOS.
 
 ## Usage
 
 ### Menu Bar Display
-The menu bar icon shows:
-- **👁️ 19:45** - Time until next micro break (eye rest)
-- **☕️ 58:30** - Time until next long break
-- **⏸️** - When breaks are paused
+The menu bar icon provides an at-a-glance status:
+- **👁️ 19:45** - Time until the next micro break.
+- **☕️ 58:30** - Time until the next long break.
+- **✅** - A break has just finished; click to confirm and resume timers.
+- **😴 Idle** - Timers are paused because your Mac is idle.
+- **⏸️** - Breaks are manually paused.
 
 ### Menu Bar Controls
-- Click the countdown timer in your menu bar to access:
-  - **Live Timer Status**: Watch both countdowns update in real-time
-    - 👁️ Micro Break: 19:45 → 19:44 → 19:43...
-    - ☕️ Long Break: 58:30 → 58:29 → 58:28...
-  - **Preferences**: Configure break intervals and durations
-  - **Pause/Resume Breaks**: Temporarily disable break reminders
-  - **Quit**: Exit the application
+Click the status item in your menu bar to access:
+- **Live Timer Status**: Displays continuously updating countdowns for *both* micro and long breaks.
+- **Preferences**: Open the window to configure break intervals, durations, and start-on-login.
+- **Start Micro Break Now**: Immediately begin a micro break.
+- **Start Long Break Now**: Immediately begin a long break.
+- **Pause/Resume Breaks**: Toggle the global pause state for all break timers.
+- **Reset All Timers**: Clears all current timer progress and break counts, and restarts fresh timers according to your saved preferences.
+- **Quit**: Exit the application.
 
 ### Break Windows
 When it's time for a break, the app will:
-1. Send a system notification
-2. Display a full-screen break window with:
-   - Break type and instructions
-   - Countdown timer
-   - "Skip Break" button if you need to continue working
+1.  Send a system notification (if enabled).
+2.  Display a full-screen break window featuring:
+    - Break type and a brief instruction (e.g., "Rest Your Eyes" or "Step Away From Screen").
+    - A countdown timer for the break's duration.
+    - Statistics: Number of micro/long breaks taken this session, and time until the *next* micro and long breaks (after the current one).
+    - A "Break Complete" button. Clicking this (or pressing Enter) dismisses the window and resumes normal work/break cycles.
 
 ### Customization
-Access Preferences from the menu bar to configure:
-- **Micro Break Interval**: How often to show 20-second breaks (default: 20 minutes)
-- **Micro Break Duration**: How long micro breaks last (default: 20 seconds)
-- **Long Break Interval**: How often to show long breaks (default: 60 minutes)
-- **Long Break Duration**: How long long breaks last (default: 10 minutes)
-- **Start on Login**: Automatically launch Refrain when you log into macOS
+Access **Preferences** from the menu bar to configure:
+- Micro Break: Interval (minutes) and Duration (seconds).
+- Long Break: Interval (minutes) and Duration (minutes).
+- Start Refrain on Login checkbox.
 
 ## Default Settings
 
 - **Micro breaks**: 20 seconds every 20 minutes
 - **Long breaks**: 10 minutes every 60 minutes
 
-These match common recommendations for computer eye strain prevention and ergonomic health.
+These can be easily changed in the Preferences window.
 
 ## Technical Details
 
-- Built with Swift and AppKit for native macOS performance
-- Uses UserNotifications framework for system notifications
-- Settings are automatically saved to UserDefaults
-- Runs as a menu bar app (LSUIElement = true)
-- Requires macOS 11.0 or later
+- Built with Swift and AppKit for native macOS performance.
+- Uses UserNotifications framework for system notifications.
+- Uses IOKit to detect system idle time.
+- Settings are automatically saved to UserDefaults.
+- Runs as a menu bar (agent) application (`LSUIElement = true`).
+- Assumed to require macOS 11.0 or later (based on typical Swift project settings, but not strictly enforced by build script).
 
 ## Troubleshooting
 
-### App won't open
-- Make sure you right-clicked and selected "Open" the first time
-- Check that you have macOS 11.0 or later
+### App won't open / Gatekeeper
+- Ensure `Refrain.app` is in your `/Applications` folder for best results.
+- On first launch, you **must** right-click (or Control-click) the app icon and select "Open" from the context menu.
+- You may need to confirm this action in a dialog box or by going to `System Settings > Privacy & Security` and allowing the app to run.
 
 ### No notifications appearing
-- Check System Preferences > Notifications > Refrain
-- Make sure notifications are enabled for the app
-
-### Break windows not appearing
-- The app may need accessibility permissions in some cases
-- Check System Preferences > Security & Privacy > Privacy > Accessibility
+- Check `System Settings > Notifications > Refrain`.
+- Ensure notifications are enabled and configured to your liking for the app.
 
 ### Start on Login not working
 The app tries multiple methods to add itself to login items:
-1. **Modern API** (macOS 13+): Uses SMAppService
-2. **Legacy API**: Uses SMLoginItemSetEnabled  
-3. **AppleScript fallback**: Directly adds to System Events
+1.  **Modern API** (macOS 13+): Uses `SMAppService`.
+2.  **Legacy API**: Uses `SMLoginItemSetEnabled`.
+3.  **AppleScript fallback**: Directly adds to System Events login items.
 
-If automatic setup fails, you'll see a dialog with manual instructions:
-1. Open System Preferences → Users & Groups
-2. Click your user account → Login Items tab
-3. Click "+" and select Refrain.app
-4. For best results, copy Refrain.app to Applications folder first
+If automatic setup fails, the Preferences window may show manual instructions, or the checkbox might not stay checked. You can manually add `Refrain.app` (preferably from your Applications folder) via:
+`System Settings > General > Login Items`, then click the "+" under "Open at Login".
 
-The preferences window shows ✅ when Refrain is actually in your login items.
+The checkbox in Refrain's Preferences window attempts to reflect the actual login item status.
 
