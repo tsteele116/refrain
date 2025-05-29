@@ -15,7 +15,7 @@ mkdir -p "${RESOURCES_PATH}"
 
 # Compile Swift code
 echo "Building ${APP_NAME}..."
-swiftc -o "${APP_BUNDLE_PATH}/${APP_NAME}" "${SWIFT_FILE}" -import-objc-header "Refrain-Bridging-Header.h" # Assuming you might need a bridging header later
+swiftc -o "${APP_BUNDLE_PATH}/${APP_NAME}" "${SWIFT_FILE}"
 
 # Check if compilation was successful
 if [ $? -ne 0 ]; then

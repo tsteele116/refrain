@@ -113,6 +113,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startLongBreakItem.isEnabled = canManuallyStartBreak
         menu.addItem(startLongBreakItem)
         
+        // Reset Timers option
+        let resetTimersItem = NSMenuItem(title: "Reset All Timers", action: #selector(resetAllTimers), keyEquivalent: "")
+        menu.addItem(resetTimersItem)
+
         menu.addItem(NSMenuItem.separator()) // Separator before pause/quit
 
         if breakTimer.isWaitingForBreakConfirmation {
@@ -213,6 +217,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     
     @objc func confirmBreakComplete() {
         breakTimer.confirmBreakComplete()
+    }
+    
+    @objc func resetAllTimers() {
+        print("[AppDelegate] User requested to Reset All Timers.")
+        breakTimer.resetAndRestartTimers()
+        // The resetAndRestartTimers method in BreakTimer already calls appDelegate.updateMenu()
+        // and breakTimer.updateMenuBarDisplay() via DispatchQueue.main.async.
     }
     
     @objc func startMicroBreakNow() {
@@ -442,19 +453,26 @@ class BreakTimer {
             // print("[BreakTimer] Idle time: \(currentIdleTime)s. Threshold: \(idleThreshold)s") // DEBUG
             if currentIdleTime > idleThreshold {
                 if !isPausedDueToIdle {
-                    print("[BreakTimer] Idle threshold exceeded. Pausing timers due to idle.")
+                    print("[BreakTimer] Idle threshold exceeded. Pausing timers due to idle. System idle for \(currentIdleTime)s.")
                     isPausedDueToIdle = true
                     
-                    let now = Date()
+                    let now = Date() // Time when idle > threshold is detected
+                    // 'currentIdleTime' is from the outer 'if let currentIdleTime = getSystemIdleTime()'
+                    // and is the value that triggered this block (i.e., currentIdleTime > idleThreshold)
+
                     if let microStart = microBreakStartTime, !isMicroBreakTimerPausedPendingOtherBreak {
-                        let elapsed = now.timeIntervalSince(microStart)
-                        microBreakAccumulatedElapsed += elapsed
-                        print("[BreakTimer] Idle Pause: Micro break accumulating \(elapsed)s. Total: \(microBreakAccumulatedElapsed)s")
+                        let elapsedThisSegment = now.timeIntervalSince(microStart)
+                        // Calculate actual work done by subtracting the *entire* current system idle time
+                        // from the duration this timer segment appeared to be running.
+                        let actualWorkDoneThisSegment = max(0, elapsedThisSegment - currentIdleTime)
+                        microBreakAccumulatedElapsed += actualWorkDoneThisSegment
+                        print("[BreakTimer] Idle Pause: Micro timer segment ran for \(elapsedThisSegment)s. System idle for \(currentIdleTime)s. Actual work credited: \(actualWorkDoneThisSegment)s. New total accumulated: \(microBreakAccumulatedElapsed)s")
                     }
                     if let longStart = longBreakStartTime, !isLongBreakTimerPausedPendingOtherBreak {
-                        let elapsed = now.timeIntervalSince(longStart)
-                        longBreakAccumulatedElapsed += elapsed
-                        print("[BreakTimer] Idle Pause: Long break accumulating \(elapsed)s. Total: \(longBreakAccumulatedElapsed)s")
+                        let elapsedThisSegment = now.timeIntervalSince(longStart)
+                        let actualWorkDoneThisSegment = max(0, elapsedThisSegment - currentIdleTime)
+                        longBreakAccumulatedElapsed += actualWorkDoneThisSegment
+                        print("[BreakTimer] Idle Pause: Long timer segment ran for \(elapsedThisSegment)s. System idle for \(currentIdleTime)s. Actual work credited: \(actualWorkDoneThisSegment)s. New total accumulated: \(longBreakAccumulatedElapsed)s")
                     }
 
                     microBreakTimer?.invalidate()
@@ -911,6 +929,53 @@ class BreakTimer {
         }
         print("[BreakTimer] confirmBreakComplete() finished scheduling async tasks")
     }
+
+    func resetAndRestartTimers() {
+        print("[BreakTimer] resetAndRestartTimers() called - resetting all states and restarting.")
+
+        // 1. Call stop() to clear core timer states, accumulated values, start times, pending flags, idle flag.
+        stop()
+
+        // 2. Dismiss any current break window and clear the reference
+        // Ensure this is done on the main thread if BreakWindow interacts with UI for dismissal
+        DispatchQueue.main.async { [weak self] in
+            if let currentWindow = self?.currentBreakWindow {
+                print("[BreakTimer] resetAndRestartTimers: Dismissing current break window.")
+                currentWindow.dismiss() // BreakWindow.dismiss() handles UI and nils its own window
+                self?.currentBreakWindow = nil
+            }
+        }
+
+        // 3. Reset break confirmation state
+        isWaitingForBreakConfirmation = false
+        lastBreakType = nil
+        print("[BreakTimer] resetAndRestartTimers: Cleared break confirmation state.")
+
+        // 4. Ensure global pause is off so timers will actually start
+        isPaused = false 
+        print("[BreakTimer] resetAndRestartTimers: Global pause set to false.")
+
+        // isPausedDueToIdle is already handled by stop()
+
+        // 5. Reset session break counters
+        microBreaksTakenSession = 0
+        longBreaksTakenSession = 0
+        print("[BreakTimer] resetAndRestartTimers: Session break counters reset.")
+
+        // 6. Call start() to schedule fresh timers
+        // start() itself is asynchronous and updates menu bar display upon completion of its async block.
+        start()
+        print("[BreakTimer] resetAndRestartTimers: Called start() to reschedule timers.")
+
+        // 7. Explicitly update menu and menu bar display through appDelegate after reset operations
+        // Although start() calls updateMenuBarDisplay(), an immediate update might be good for responsiveness of the menu item itself.
+        DispatchQueue.main.async { [weak self] in // Ensure UI updates are on main thread
+            print("[BreakTimer] resetAndRestartTimers: Triggering AppDelegate menu and display update.")
+            self?.appDelegate?.updateMenu() // This will rebuild the menu
+            self?.updateMenuBarDisplay() // This updates the status item's title
+        }
+        print("[BreakTimer] resetAndRestartTimers() finished.")
+    }
 }
 
 enum BreakType {
@@ -942,7 +1007,7 @@ func formatTimeInterval(_ interval: TimeInterval) -> String {
 public func getSystemIdleTime() -> Double? {
     var iterator: io_iterator_t = 0
     defer { IOObjectRelease(iterator) }
-    guard IOServiceGetMatchingServices(kIOMasterPortDefault, IOServiceMatching("IOHIDSystem"), &iterator) == KERN_SUCCESS else { return nil }
+    guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOHIDSystem"), &iterator) == KERN_SUCCESS else { return nil }
 
     let entry: io_registry_entry_t = IOIteratorNext(iterator)
     defer { IOObjectRelease(entry) }
