@@ -1,0 +1,51 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on tags like v1.0, v2.0.1, etc.
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: macos-latest # Use a macOS runner for your Swift app
+    permissions:
+      contents: write # Needed to create releases
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4 # Or a specific version like v3
+
+      - name: Build the application
+        run: |
+          echo "Building Refrain.app..."
+          ./build.sh
+          if [ ! -d "Refrain.app" ]; then
+            echo "Error: Refrain.app not found after build."
+            exit 1
+          fi
+        shell: bash
+
+      - name: Package the application
+        run: |
+          echo "Zipping Refrain.app..."
+          zip -r Refrain.app.zip Refrain.app
+          if [ ! -f "Refrain.app.zip" ]; then
+            echo "Error: Refrain.app.zip not created."
+            exit 1
+          fi
+        shell: bash
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: Refrain.app.zip # Path to the asset to upload
+          # The release name and body will be automatically generated from the tag.
+          # You can customize these:
+          # name: Refrain ${{ github.ref_name }}
+          # body: |
+          #   Automated release for version ${{ github.ref_name }}
+          #   See commit history for changes.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This is automatically provided by GitHub Actions
