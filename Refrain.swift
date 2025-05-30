@@ -1150,6 +1150,13 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
                 self.timer?.invalidate()
                 self.countdownLabel.stringValue = "Break time is up!"
                 self.countdownLabel.textColor = .systemGreen
+                
+                // Play a sound when the break is done, specific to break type
+                if self.breakType == .micro {
+                    NSSound(named: NSSound.Name("Tink"))?.play()
+                } else if self.breakType == .long {
+                    NSSound(named: NSSound.Name("Glass"))?.play()
+                }
             }
         }
     }
