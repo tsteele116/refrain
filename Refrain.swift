@@ -96,10 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
              menu.addItem(pausedMenuItem!)
              menu.addItem(NSMenuItem.separator())
         }
-        
-        // Add control items
-        menu.addItem(NSMenuItem(title: "Preferences", action: #selector(showPreferences), keyEquivalent: ""))
-        
+                
         // Manual break start options
         // Enabled if not waiting for confirmation and not globally paused.
         // If idle, still allow manual start (user interaction implies not idle anymore, and BreakTimer handles idle state changes).
@@ -117,7 +114,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let resetTimersItem = NSMenuItem(title: "Reset All Timers", action: #selector(resetAllTimers), keyEquivalent: "")
         menu.addItem(resetTimersItem)
 
-        menu.addItem(NSMenuItem.separator()) // Separator before pause/quit
+        menu.addItem(NSMenuItem.separator()) // Separator before pause/quit or other app actions
 
         if breakTimer.isWaitingForBreakConfirmation {
             // Don't show pause/resume when waiting for confirmation
@@ -125,10 +122,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let pauseTitle = breakTimer.isPaused ? "Resume Breaks" : "Pause Breaks"
             menu.addItem(NSMenuItem(title: pauseTitle, action: #selector(toggleBreaks), keyEquivalent: ""))
         }
+        // menu.addItem(NSMenuItem(title: "Preferences", action: #selector(showPreferences), keyEquivalent: "")) // REMOVED From here
+        // menu.addItem(NSMenuItem.separator()) // This separator might be redundant or need adjustment
         
-        menu.addItem(NSMenuItem.separator())
+        // New position for Preferences, grouped with Quit
+        // If there was a Pause/Resume item, it would be above this new separator.
+        // If not (due to break confirmation), the separator above resetTimersItem serves to separate controls from App/Quit.
+        menu.addItem(NSMenuItem.separator()) // Ensure separation for Preferences/Quit group if needed, or adjust existing ones
+        menu.addItem(NSMenuItem(title: "Preferences", action: #selector(showPreferences), keyEquivalent: ",")) // ADDED here with key equivalent
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        
+
         statusItem.menu = menu
         statusItem.menu?.delegate = self
         
@@ -148,12 +151,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let longElapsed = now.timeIntervalSince(longStart)
         let microRemaining = max(0, breakTimer.microBreakInterval - microElapsed)
         let longRemaining = max(0, breakTimer.longBreakInterval - longElapsed)
+        
+        // Get current break stats for cycle information
+        let currentStats = breakTimer.getCurrentBreakStats()
+        let cycleInfo = "(Cycle \(currentStats.microBreaksInCurrentLongCycle + 1) of \(currentStats.maxMicroBreaksInLongCycle))"
+        // We add +1 to microBreaksInCurrentLongCycle for display because it represents *completed* cycles.
+        // So, if 0 are completed, we are in Cycle 1.
+
         // Update micro break timer
         if let microItem = microBreakMenuItem {
             let microMinutes = Int(microRemaining) / 60
             let microSeconds = Int(microRemaining) % 60
             let microTimeString = String(format: "%d:%02d", microMinutes, microSeconds)
-            microItem.title = "👁️ Micro Break: \(microTimeString)"
+            microItem.title = "👀 Micro Break: \(microTimeString) \(cycleInfo)"
         } else {
             print("[AppDelegate] updateTimerMenuItems: microBreakMenuItem is nil")
         }
@@ -262,6 +272,8 @@ struct BreakStats {
     let timeUntilNextMicroBreak: TimeInterval 
     let timeUntilNextLongBreak: TimeInterval
     let currentBreakType: BreakType? // To know which break screen we are on
+    let microBreaksInCurrentLongCycle: Int
+    let maxMicroBreaksInLongCycle: Int
 }
 
 class BreakTimer {
@@ -293,6 +305,7 @@ class BreakTimer {
     
     var microBreaksTakenSession: Int = 0
     var longBreaksTakenSession: Int = 0
+    var microBreaksInCurrentLongCycle: Int = 0 // New counter
     
     init() {
         loadSettings()
@@ -561,7 +574,7 @@ class BreakTimer {
         let minutes = Int(nextBreakTime) / 60
         let seconds = Int(nextBreakTime) % 60
         
-        let icon = isNextBreakMicro ? "👁️" : "☕️"
+        let icon = isNextBreakMicro ? "👀" : "☕️"
         let timeString = String(format: "%d:%02d", minutes, seconds)
         
         appDelegate.statusItem.button?.title = "\(icon) \(timeString)"
@@ -858,6 +871,10 @@ class BreakTimer {
             nextLongInterval = max(0, longBreakInterval - longBreakAccumulatedElapsed)
         }
         
+        // Calculate max micro breaks in a long cycle
+        // Avoid division by zero, though microBreakInterval should always be > 0
+        let maxMicroInLong = microBreakInterval > 0 ? Int(round(longBreakInterval / microBreakInterval)) : 0
+        
         // If waiting for confirmation for a specific break type, that break type's *own* timer
         // is what we're currently experiencing. So, the "time until next" for *that* type
         // should reflect the full interval that will start *after* this confirmation.
@@ -868,7 +885,9 @@ class BreakTimer {
             longBreaksTaken: longBreaksTakenSession,
             timeUntilNextMicroBreak: nextMicroInterval,
             timeUntilNextLongBreak: nextLongInterval,
-            currentBreakType: isWaitingForBreakConfirmation ? lastBreakType : nil
+            currentBreakType: isWaitingForBreakConfirmation ? lastBreakType : nil,
+            microBreaksInCurrentLongCycle: microBreaksInCurrentLongCycle,
+            maxMicroBreaksInLongCycle: maxMicroInLong
         )
     }
     
@@ -881,10 +900,12 @@ class BreakTimer {
         // Increment break counts based on the break that just finished
         if completedBreakType == .micro {
             microBreaksTakenSession += 1
-            print("[BreakTimer] confirmBreakComplete: Micro break session count: \(microBreaksTakenSession)")
+            microBreaksInCurrentLongCycle += 1 // Increment cycle counter
+            print("[BreakTimer] confirmBreakComplete: Micro break session count: \(microBreaksTakenSession), cycle count: \(microBreaksInCurrentLongCycle)")
         } else if completedBreakType == .long {
             longBreaksTakenSession += 1
-            print("[BreakTimer] confirmBreakComplete: Long break session count: \(longBreaksTakenSession)")
+            microBreaksInCurrentLongCycle = 0 // Reset cycle counter
+            print("[BreakTimer] confirmBreakComplete: Long break session count: \(longBreaksTakenSession), cycle count reset to 0.")
         }
 
         let now = Date()
@@ -960,7 +981,8 @@ class BreakTimer {
         // 5. Reset session break counters
         microBreaksTakenSession = 0
         longBreaksTakenSession = 0
-        print("[BreakTimer] resetAndRestartTimers: Session break counters reset.")
+        microBreaksInCurrentLongCycle = 0 // Reset cycle counter
+        print("[BreakTimer] resetAndRestartTimers: Session break counters and micro break cycle counter reset.")
 
         // 6. Call start() to schedule fresh timers
         // start() itself is asynchronous and updates menu bar display upon completion of its async block.
@@ -1031,6 +1053,8 @@ public func getSystemIdleTime() -> Double? {
 class BreakWindow: NSObject { // Make it subclass NSObject if not already for unowned reference
     private var window: NSWindow? // Make optional
     private var dimmingWindows: [NSWindow] = []
+    private var backgroundView: NSView! // For fading background separately
+
     // Declare UI elements that will be set up in setupMainWindow and then laid out in setupUI
     private var titleLabel: NSTextField! 
     private var countdownLabel: NSTextField!
@@ -1060,16 +1084,17 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
     private func setupWindows() {
         // Get all screens
         let screens = NSScreen.screens
-        guard let mainScreen = NSScreen.main else { return }
-        
-        // Create main break window on primary monitor
-        setupMainWindow(on: mainScreen) // This will now just create elements, not layout
-        
-        // Create dimming windows for all other monitors
+        // guard let mainScreen = NSScreen.main else { return } // mainScreen will be used later
+
+        // Create dimming windows for ALL screens first
         for screen in screens {
-            if screen != mainScreen {
-                setupDimmingWindow(on: screen)
-            }
+            setupDimmingWindow(on: screen) 
+        }
+        
+        // Then set up the main content window (which will have a clear backgroundView)
+        // on the main screen.
+        if let mainScreen = NSScreen.main {
+            setupMainWindow(on: mainScreen) 
         }
     }
     
@@ -1081,13 +1106,18 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
         guard let strongWindow = window else { return }
         strongWindow.isReleasedWhenClosed = false
         strongWindow.level = .screenSaver
-        strongWindow.backgroundColor = breakType == .micro ? 
-            NSColor.black.withAlphaComponent(0.8) : 
-            NSColor.black.withAlphaComponent(0.9)
-        
+        strongWindow.backgroundColor = .clear // Main window is clear
+        strongWindow.isOpaque = false // Allow transparency
+
         let contentView = NSView(frame: screen.frame)
         strongWindow.contentView = contentView
-        
+
+        // Setup the background view. It will be clear.
+        backgroundView = NSView(frame: screen.frame)
+        backgroundView.wantsLayer = true 
+        backgroundView.layer?.backgroundColor = NSColor.clear.cgColor // Ensure it's clear
+        contentView.addSubview(backgroundView) // Add it to the hierarchy
+
         // Create UI elements but do not add to subview or set constraints here.
         // setupUI will handle that.
         titleLabel = NSTextField(labelWithString: breakType == .micro ? 
@@ -1126,16 +1156,29 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
                                    defer: false)
         dimmingWindow.isReleasedWhenClosed = false
         dimmingWindow.level = .screenSaver
-        dimmingWindow.backgroundColor = NSColor.black.withAlphaComponent(0.7)
+        // Set background to opaque black; alphaValue will control transparency
+        dimmingWindow.backgroundColor = NSColor.black 
         dimmingWindow.ignoresMouseEvents = true
         dimmingWindows.append(dimmingWindow)
     }
     
     func show() {
-        window?.makeKeyAndOrderFront(nil)
-        for dimmingWindow in dimmingWindows {
+        // Set final visual states directly (no animation)
+        
+        // Dimming windows (now on ALL screens) are set to target alpha
+        for dimmingWindow in self.dimmingWindows {
+            dimmingWindow.alphaValue = 0.7 // Dimming windows are instantly at target alpha
+        }
+        // self.backgroundView.layer?.opacity = 1.0 // No longer needed, backgroundView is clear
+
+        // Order dimming windows to the front first
+        for dimmingWindow in self.dimmingWindows {
             dimmingWindow.orderFront(nil)
         }
+        // Then order the main content window on top of everything
+        window?.makeKeyAndOrderFront(nil)
+        
+        print("[BreakWindow] Windows shown instantly (no fade-in). Dimming on all screens, main content on top.")
         startCountdown()
     }
     
@@ -1151,12 +1194,8 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
                 self.countdownLabel.stringValue = "Break time is up!"
                 self.countdownLabel.textColor = .systemGreen
                 
-                // Play a sound when the break is done, specific to break type
-                if self.breakType == .micro {
-                    NSSound(named: NSSound.Name("Tink"))?.play()
-                } else if self.breakType == .long {
-                    NSSound(named: NSSound.Name("Glass"))?.play()
-                }
+                // Play a sound when the break is done
+                NSSound(named: NSSound.Name("Glass"))?.play() // Use "Glass" for all break completions
             }
         }
     }
@@ -1174,33 +1213,79 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
     }
     
     func dismiss() {
-        print("[BreakWindow] dismiss() called")
+        print("[BreakWindow] dismiss() called, closing windows instantly.")
         timer?.invalidate()
         timer = nil
-        print("[BreakWindow] Countdown timer invalidated and nilled")
 
-        // skipButton?.target = nil // REMOVED
         completeButton?.target = nil
-        print("[BreakWindow] Button targets nilled")
 
-        if let strongWindow = window {
+        // Set final visual states for instant disappearance (optional, as windows will close)
+        // self.backgroundView.layer?.opacity = 0.0 
+        // for dimmingWindow in self.dimmingWindows {
+        //    dimmingWindow.alphaValue = 0.0
+        // }
+
+        // Remove NSAnimationContext block for fade-out
+        /*
+        NSAnimationContext.runAnimationGroup({
+            context in
+            context.duration = 0.25 // Quick fade-out
+            
+            self.backgroundView.animator().layer?.opacity = 0.0
+            
+            for dimmingWindow in self.dimmingWindows {
+                dimmingWindow.animator().alphaValue = 0.0
+            }
+        }, completionHandler: {
+            print("[BreakWindow] Fade-out animation (background and dimming windows) complete.")
+            self.performCloseOperations()
+        })
+        */
+
+        // Close operations are now called directly for instant dismissal
+        self.performCloseOperations()
+        print("[BreakWindow] Windows dismissed instantly (no fade-out).")
+    }
+    
+    private func performCloseOperations() {
+        print("[BreakWindow] performCloseOperations called.")
+        if let strongWindow = self.window {
             strongWindow.contentView?.subviews.forEach { $0.removeFromSuperview() }
             strongWindow.contentView = nil
-            print("[BreakWindow] ContentView cleared and nilled")
             strongWindow.close()
-            self.window = nil // Release our strong reference to the NSWindow
-            print("[BreakWindow] Main NSWindow closed and nilled")
+            self.window = nil
         }
         
-        for i in stride(from: dimmingWindows.count - 1, through: 0, by: -1) {
-            let dimmingWin = dimmingWindows.remove(at: i)
+        let windowsToClose = self.dimmingWindows
+        self.dimmingWindows.removeAll()
+
+        for dimmingWin in windowsToClose {
             dimmingWin.contentView?.subviews.forEach { $0.removeFromSuperview() }
             dimmingWin.contentView = nil
             dimmingWin.close()
         }
-        print("[BreakWindow] Dimming windows closed, contentView cleared, and cleared from array")
     }
     
+    // Make BreakWindow conform to CAAnimationDelegate
+    // Add this extension if BreakWindow doesn't already conform
+    // extension BreakWindow: CAAnimationDelegate { ... }
+    // Actually, since BreakWindow is already NSObject, it can be a delegate.
+    // We need to implement animationDidStop.
+
+    /*
+    @objc func animationDidStop(_ anim: CAAnimation, finished flag: Bool) {
+        // Check if it's our fade-out animation
+        // A more robust way would be to give the animation a specific key or check its properties
+        // For now, we assume any opacity animation stopping means we should close.
+        if flag, let animationName = anim.value(forKey: "animationName") as? String, animationName == "backgroundFadeOut" { // Ensure animation completed fully and it's the correct one
+            print("[BreakWindow] opacityFadeOut animationDidStop for 'backgroundFadeOut'. Performing close operations.")
+            performCloseOperations()
+        } else if flag {
+            print("[BreakWindow] animationDidStop for an unknown animation, or not 'backgroundFadeOut'. Flag: \(flag), Name: \(String(describing: anim.value(forKey: "animationName")))")
+        }
+    }
+    */
+
     private func formatTime(_ time: TimeInterval) -> String {
         let minutes = Int(time) / 60
         let seconds = Int(time) % 60
@@ -1217,7 +1302,8 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
             return 
         }
 
-        // Add all UI elements to the contentView
+        // Add all UI elements to the contentView, ensuring they are on top of backgroundView
+        // backgroundView is already a subview of contentView from setupMainWindow
         contentView.addSubview(titleLabel)
         contentView.addSubview(countdownLabel)
 
@@ -1230,23 +1316,29 @@ class BreakWindow: NSObject { // Make it subclass NSObject if not already for un
         contentView.addSubview(statsLabel)
 
         // Populate stats label
-        statsLabel.stringValue = "Breaks Taken: 👁️ \(stats.microBreaksTaken) | ☕️ \(stats.longBreaksTaken)\n" + {
+        let statsText = { () -> String in // Explicitly define closure return type
+            let baseText = "Breaks Taken: 👀 \(stats.microBreaksTaken) | ☕️ \(stats.longBreaksTaken)\n"
             if stats.currentBreakType == .micro {
-                return "Next Long Break: \(formatTimeInterval(stats.timeUntilNextLongBreak)) (after this micro break: \(formatTimeInterval(stats.timeUntilNextMicroBreak)))"
+                // For micro break screen, show its cycle info and when the next long break is
+                let cycleInfo = "Cycle \(stats.microBreaksInCurrentLongCycle + 1) of \(stats.maxMicroBreaksInLongCycle)"
+                return baseText + "Micro Break \(cycleInfo) - Next Long Break: \(formatTimeInterval(stats.timeUntilNextLongBreak)) (After this: \(formatTimeInterval(stats.timeUntilNextMicroBreak)))"
             } else if stats.currentBreakType == .long {
-                return "Next Micro Break: \(formatTimeInterval(stats.timeUntilNextMicroBreak)) (after this long break: \(formatTimeInterval(stats.timeUntilNextLongBreak)))"
+                return baseText + "Next Micro Break: \(formatTimeInterval(stats.timeUntilNextMicroBreak)) (after this long break: \(formatTimeInterval(stats.timeUntilNextLongBreak)))"
             } else {
                 // Fallback, should ideally not be reached if break window is shown for a specific break type
-                return "Next: 👁️ \(formatTimeInterval(stats.timeUntilNextMicroBreak)) | ☕️ \(formatTimeInterval(stats.timeUntilNextLongBreak))"
+                return baseText + "Next: 👀 \(formatTimeInterval(stats.timeUntilNextMicroBreak)) | ☕️ \(formatTimeInterval(stats.timeUntilNextLongBreak))"
             }
         }() // Immediately-invoked closure
+        statsLabel.stringValue = statsText
         
         statsLabel.lineBreakMode = .byWordWrapping
         statsLabel.maximumNumberOfLines = 0
 
         // Add buttons to contentView
         // if let sb = skipButton { contentView.addSubview(sb) } // REMOVED
-        if let cb = completeButton { contentView.addSubview(cb) }
+        if let cb = completeButton { 
+            contentView.addSubview(cb) 
+        }
 
 
         // --- Layout ALL elements ---
